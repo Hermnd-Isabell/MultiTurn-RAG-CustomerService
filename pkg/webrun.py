@@ -17,6 +17,7 @@ from embed import (
     retrieve_vector_and_text,
     retrieve_vector_and_text_for_drug,
     retrieve_drug_subsections,
+    retrieve_with_context,
     get_openai_client,
     clear_openai_client_cache,
     quick_intent_hint,
@@ -31,6 +32,51 @@ history = []  # 问答记忆列表
 # Elasticsearch 客户端懒加载缓存：避免在模块导入阶段就连接 ES，
 # 否则 ES 未启动时会静默返回 None，后续请求才在运行时报错。
 _es_client = None
+
+# -----------------------------------------------------------------------------
+# P4.3 会话级结构化事实缓存（Gradio 每次页面刷新会重置进程，
+# 模块级变量即会话级隔离）
+# -----------------------------------------------------------------------------
+_session_facts = {
+    "primary_drug": None,      # 当前会话主要讨论的药品
+    "queried_fields": set(),   # 已查询过的字段集合
+    "last_intent": None,       # 上一轮意图：pharmacy / chitchat / compare
+    "drug_history": [],        # 本轮会话提到过的所有药品（按时间顺序，去重）
+}
+
+
+def _update_session_facts(target_drug, target_fields, intent_hint):
+    """每轮问答结束后更新会话事实缓存。"""
+    global _session_facts
+    if target_drug:
+        _session_facts["primary_drug"] = target_drug
+        if target_drug not in _session_facts["drug_history"]:
+            _session_facts["drug_history"].append(target_drug)
+    if target_fields:
+        _session_facts["queried_fields"].update(target_fields)
+    if intent_hint:
+        _session_facts["last_intent"] = intent_hint
+
+
+def get_session_drug():
+    """获取当前会话的主要药品，供指代消解和检索层使用。"""
+    return _session_facts.get("primary_drug")
+
+
+def get_session_fields():
+    """获取已查询过的字段集合。"""
+    return set(_session_facts.get("queried_fields", set()))
+
+
+def clear_session_facts():
+    """重置会话事实（如用户点击'清空对话'时调用）。"""
+    global _session_facts
+    _session_facts = {
+        "primary_drug": None,
+        "queried_fields": set(),
+        "last_intent": None,
+        "drug_history": [],
+    }
 
 
 def get_es_client():
@@ -96,6 +142,102 @@ def _confirm_drug_in_es(drug_name):
     except Exception as e:
         print(f"[es-confirm] 查询药品 '{drug_name}' 失败: {e}")
         return False
+
+
+# 指代词集合：用于判断当前问题是否需要结合历史对话做改写
+_PRONOUNS = {
+    '他', '她', '它', '这个药', '该药', '此药', '刚才', '上面', '之前',
+    '之前那个', '刚才那个', '这个', '那个', '其'
+}
+
+
+def _format_history(history, max_turns=3):
+    """
+    把 Gradio 的 history 列表格式化为文本。
+    history 格式：[(user_msg, assistant_msg), ...]
+    只取最近 max_turns 轮，避免 prompt 过长。
+    """
+    if not history:
+        return ""
+    lines = []
+    for item in history[-max_turns:]:
+        try:
+            user_msg, bot_msg = item
+            lines.append(f"User: {user_msg}")
+            # 截断助手回复避免 prompt 过长
+            bot_snip = bot_msg[:200] if bot_msg else ""
+            lines.append(f"Assistant: {bot_snip}...")
+        except Exception:
+            continue
+    return "\n".join(lines)
+
+
+def _rewrite_query_with_history(current_message, history, llm_client):
+    """
+    结合对话历史，把包含指代词的当前问题改写成独立、完整的问题。
+
+    规则：
+    1. 如果 current_message 中已包含药品名（_extract_drug_name_from_query 能提取到），
+       说明问题已自包含，无需改写，直接返回原消息。
+    2. 如果 current_message 中不含任何指代词，直接返回原消息。
+    3. 否则，调用 LLM 结合 history 做改写。
+
+    返回：改写后的字符串（或原字符串）。
+    """
+    if not current_message or not current_message.strip():
+        return current_message
+
+    # 规则 1：已含药品名 → 自包含，跳过
+    try:
+        existing_drug = _extract_drug_name_from_query(current_message)
+        if existing_drug:
+            print(f"[query-rewrite] 消息已含药品名 '{existing_drug}'，跳过改写")
+            return current_message
+    except Exception:
+        pass
+
+    # 规则 2：不含指代词 → 跳过
+    text = current_message.strip()
+    has_pronoun = any(p in text for p in _PRONOUNS)
+    if not has_pronoun:
+        return current_message
+
+    # 规则 3：调用 LLM 改写
+    if not history:
+        return current_message
+
+    formatted_history = _format_history(history, max_turns=3)
+    rewrite_prompt = f"""你是一个对话理解助手。请根据以下对话历史，把用户的当前问题改写成独立、完整的问题（消除指代词）。
+
+要求：
+- 如果当前问题包含"他/她/它/这个药/该药/此药/刚才/上面/之前"等指代词，请根据历史对话确定指代对象，并替换为具体名称。
+- 改写后的问题必须是一个完整的、不依赖上下文也能理解的问题。
+- 只输出改写后的问题，不要解释，不要加引号。
+- 如果当前问题已经完整（不含指代词），请原样输出。
+
+对话历史：
+{formatted_history}
+
+当前问题：{current_message}
+
+改写后的问题："""
+
+    try:
+        if llm_client is None:
+            llm_client = get_openai_client()
+        response = llm_client.chat.completions.create(
+            model=config.LLM_MODEL,
+            messages=[{"role": "user", "content": rewrite_prompt}],
+            temperature=0.0,
+        )
+        rewritten = response.choices[0].message.content.strip() if response.choices else ""
+        if rewritten and rewritten != current_message:
+            print(f"[query-rewrite] '{current_message}' → '{rewritten}'")
+            return rewritten
+    except Exception as e:
+        print(f"[query-rewrite] LLM 改写失败，使用原消息: {e}")
+
+    return current_message
 
 # ... existing imports ...
 
@@ -247,8 +389,20 @@ def slow_echo(message, history, enable_thinking=True):
     """
     print(f"\n{'='*60}")
     print(f"[slow_echo] ===== 新问答请求 =====")
-    print(f"[slow_echo] 用户消息: {message}")
+    print(f"[slow_echo] 用户原始消息: {message}")
     print(f"[slow_echo] history 长度: {len(history) if history else 0}")
+
+    # ============ 0) 查询改写：消除指代词 ============
+    original_message = message
+    if history and getattr(config, 'ENABLE_INTENT_ROUTING', False):
+        rewritten = _rewrite_query_with_history(message, history, get_openai_client())
+        if rewritten and rewritten != message:
+            print(f"[query-rewrite] '{message}' → '{rewritten}'")
+            message = rewritten
+        else:
+            print(f"[query-rewrite] 无需改写: '{message}'")
+    else:
+        print(f"[query-rewrite] 跳过改写（history 为空或意图路由层未启用）")
 
     if enable_thinking is None:
         enable_thinking = getattr(config, 'ENABLE_THINKING', True)
@@ -264,9 +418,11 @@ def slow_echo(message, history, enable_thinking=True):
     target_drug = None
     drug_exists = False
     standardizer = None
+    intent_hint = None  # P4.3 用于会话事实缓存
     if has_kb and getattr(config, 'ENABLE_INTENT_ROUTING', False):
         try:
             hint = quick_intent_hint(message)
+            intent_hint = hint  # P4.3 记录意图
             print(f"[slow_echo] intent hint: {hint}")
             if hint == 'obvious_chitchat':
                 target_fields = []
@@ -306,8 +462,19 @@ def slow_echo(message, history, enable_thinking=True):
             except Exception as e:
                 print(f"[slow_echo] → [drug-extract] 药品名提取或 ES 确认失败: {e}")
                 target_drug = None
+
+        # P4.3：当前轮次未提取到药品名时，尝试从会话事实缓存读取
+        if not target_drug:
+            session_cached_drug = get_session_drug()
+            if session_cached_drug:
+                print(f"[session-facts] 当前消息未提取到药品名，使用会话缓存 '{session_cached_drug}'")
+                target_drug = session_cached_drug
+                drug_exists = _confirm_drug_in_es(target_drug)
     else:
         print(f"[slow_echo] → 意图路由层未启用（知识库不存在或开关关闭）")
+
+    # P4.2 + P4.3：确定 session_drug（优先当前轮次，其次会话缓存）
+    session_drug = target_drug or get_session_drug()
 
     # ============ 2) 检索决策：主路径 ES 精确锁定，降级路径全库向量检索 ============
     results = []
@@ -323,8 +490,8 @@ def slow_echo(message, history, enable_thinking=True):
         if not results:
             try:
                 retrieve_k = 10 if getattr(config, 'ENABLE_INTENT_ROUTING', False) else 3
-                print(f"[slow_echo] → [降级路径] FAISS 全库检索 top_k={retrieve_k}")
-                results = retrieve_vector_and_text(message, current_db_path, top_k=retrieve_k)
+                print(f"[slow_echo] → [降级路径] FAISS 全库检索 top_k={retrieve_k}, session_drug={session_drug}")
+                results = retrieve_with_context(message, current_db_path, context_drug=session_drug, top_k=retrieve_k)
                 print(f"[slow_echo] → FAISS 返回 {len(results)} 条结果（重排前）")
                 for rank, r in enumerate(results):
                     print(f"[slow_echo]   raw[{rank}] id='{r[0]}' title='{r[1]}'")
@@ -468,6 +635,12 @@ def slow_echo(message, history, enable_thinking=True):
         import traceback
         traceback.print_exc()
         yield f"Error calling LLM: {e}"
+
+    # P4.3：更新会话事实缓存，供下一轮使用
+    _update_session_facts(target_drug, set(target_fields), intent_hint)
+    print(f"[session-facts] 更新: primary_drug={get_session_drug()}, "
+          f"fields={get_session_fields()}, history={_session_facts['drug_history']}")
+
     print(f"{'='*60}\n")
 
 # ...

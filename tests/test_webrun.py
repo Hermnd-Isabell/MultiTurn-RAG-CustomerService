@@ -487,4 +487,154 @@ class TestEsClientLifecycle:
             assert webrun.get_es_client() is fake_es1
             webrun.clear_es_cache()
             assert webrun._es_client is None
-            assert webrun.get_es_client() is fake_es2
+
+
+# -----------------------------------------------------------------------------
+# query rewriting：多轮对话指代消解
+# -----------------------------------------------------------------------------
+class TestQueryRewrite:
+    """_rewrite_query_with_history：结合 history 消除指代词。"""
+
+    def _make_fake_llm(self, return_text):
+        """构造一个返回固定文本的 mock LLM 客户端。"""
+        def fake_create(*args, **kwargs):
+            choice = MagicMock()
+            choice.message.content = return_text
+            resp = MagicMock()
+            resp.choices = [choice]
+            return resp
+        client = MagicMock()
+        client.chat.completions.create = fake_create
+        return client
+
+    def test_rewrite_with_pronoun(self, monkeypatch):
+        """指代词存在且不含药品名时，触发改写。"""
+        from webrun import _rewrite_query_with_history
+
+        # 模拟 _extract_drug_name_from_query 返回 None（消息不含药品名）
+        monkeypatch.setattr(
+            "webrun._extract_drug_name_from_query", lambda msg, std=None: None
+        )
+
+        fake_llm = self._make_fake_llm("川射干的副作用是什么？")
+        result = _rewrite_query_with_history(
+            "他的副作用是什么？",
+            [("川射干的性状是什么？", "川射干为不规则薄片...")],
+            fake_llm,
+        )
+        assert "川射干" in result
+        assert result == "川射干的副作用是什么？"
+
+    def test_rewrite_skip_when_drug_present(self, monkeypatch):
+        """消息已含药品名时，直接返回原消息，LLM 不被调用。"""
+        from webrun import _rewrite_query_with_history
+
+        called = [False]
+        def fake_create(*args, **kwargs):
+            called[0] = True
+            return None
+
+        fake_llm = MagicMock()
+        fake_llm.chat.completions.create = fake_create
+
+        result = _rewrite_query_with_history(
+            "川射干的副作用是什么？",
+            [("川射干的性状是什么？", "川射干为不规则薄片...")],
+            fake_llm,
+        )
+        assert result == "川射干的副作用是什么？"
+        assert not called[0]  # LLM 未被调用
+
+    def test_rewrite_skip_no_pronoun(self):
+        """不含指代词且不含药品名时，直接返回原消息。"""
+        from webrun import _rewrite_query_with_history
+        msg = "你好"
+        result = _rewrite_query_with_history(msg, [("...", "...")], None)
+        assert result == msg
+
+    def test_rewrite_empty_history(self):
+        """history 为空时直接返回原消息。"""
+        from webrun import _rewrite_query_with_history
+        msg = "他的副作用是什么？"
+        result = _rewrite_query_with_history(msg, [], None)
+        assert result == msg
+
+    def test_rewrite_llm_failure_fallback(self, monkeypatch):
+        """LLM 调用异常时降级为原消息，不抛异常。"""
+        from webrun import _rewrite_query_with_history
+
+        monkeypatch.setattr(
+            "webrun._extract_drug_name_from_query", lambda msg, std=None: None
+        )
+
+        fake_llm = MagicMock()
+        fake_llm.chat.completions.create.side_effect = RuntimeError("boom")
+
+        result = _rewrite_query_with_history(
+            "他的副作用是什么？",
+            [("川射干的性状是什么？", "川射干为不规则薄片...")],
+            fake_llm,
+        )
+        assert result == "他的副作用是什么？"
+
+
+# -----------------------------------------------------------------------------
+# session facts（P4.3）
+# -----------------------------------------------------------------------------
+class TestSessionFacts:
+    """_session_facts：会话级结构化事实缓存。"""
+
+    def setup_method(self):
+        """每个测试开始前清空缓存。"""
+        from webrun import clear_session_facts
+        clear_session_facts()
+
+    def test_update_and_get(self):
+        """更新后 getter 返回正确值。"""
+        from webrun import _update_session_facts, get_session_drug, get_session_fields
+
+        _update_session_facts("川射干", ["性状"], "obvious_pharmacy")
+        assert get_session_drug() == "川射干"
+        assert get_session_fields() == {"性状"}
+
+    def test_fallback_when_extraction_fails(self, monkeypatch):
+        """_extract_drug_name_from_query 返回 None 时，get_session_drug() 提供缓存值。"""
+        import webrun
+        from webrun import _update_session_facts, get_session_drug
+
+        _update_session_facts("川射干", [], None)
+        # mock 提取失败
+        monkeypatch.setattr(webrun, "_extract_drug_name_from_query", lambda msg, std=None: None)
+        # 模拟 slow_echo 中的 fallback 逻辑
+        assert get_session_drug() == "川射干"
+
+    def test_clear_session_facts(self):
+        """clear_session_facts 后所有 getter 返回空/None。"""
+        from webrun import (
+            _update_session_facts, get_session_drug, get_session_fields, clear_session_facts,
+        )
+
+        _update_session_facts("川射干", ["性状"], "obvious_pharmacy")
+        clear_session_facts()
+        assert get_session_drug() is None
+        assert get_session_fields() == set()
+
+    def test_multiple_drugs(self):
+        """连续更新多药品，验证 drug_history 顺序和去重。"""
+        from webrun import _update_session_facts, clear_session_facts
+        import webrun
+
+        clear_session_facts()
+        _update_session_facts("川射干", [], None)
+        _update_session_facts("当归", [], None)
+        _update_session_facts("川射干", [], None)  # 重复
+        assert webrun._session_facts["drug_history"] == ["川射干", "当归"]
+
+    def test_fields_accumulate(self):
+        """连续更新字段，验证 queried_fields 累积。"""
+        from webrun import _update_session_facts, get_session_fields, clear_session_facts
+
+        clear_session_facts()
+        _update_session_facts(None, ["性状"], None)
+        _update_session_facts(None, ["鉴别", "性状"], None)
+        assert get_session_fields() == {"性状", "鉴别"}

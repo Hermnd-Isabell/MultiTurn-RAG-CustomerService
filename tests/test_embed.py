@@ -420,3 +420,62 @@ class TestRetrieveDrugSubsections:
         assert len(results) == 2
         assert results[0][1] == "性状"
         assert results[1][1] == "鉴别"
+
+
+# -----------------------------------------------------------------------------
+# retrieve_with_context（P4.2）
+# -----------------------------------------------------------------------------
+class TestRetrieveWithContext:
+    """带会话上下文的向量检索：药品名优先过滤。"""
+
+    def test_with_context_drug(self, monkeypatch):
+        """context_drug 匹配的结果置顶，不匹配的后移。"""
+        from embed import retrieve_with_context
+
+        base = [
+            ("心速宁胶囊", "性状", "胶囊内容"),
+            ("川射干", "性状", "川射干内容"),
+            ("安阳精制膏", "用法", "膏贴内容"),
+        ]
+        monkeypatch.setattr("embed.retrieve_vector_and_text", lambda *a, **k: base)
+
+        # 只有 "川射干" 匹配
+        def mock_score(doc_id, target):
+            return 1 if "川射干" in (doc_id or "") else 0
+        monkeypatch.setattr("embed._score_result_by_drug_name", mock_score)
+
+        results = retrieve_with_context("query", "fake.npz", context_drug="川射干", top_k=3)
+        assert results[0][0] == "川射干"
+        assert len(results) == 3
+
+    def test_without_context(self, monkeypatch):
+        """context_drug=None 时直接返回基础结果截断。"""
+        from embed import retrieve_with_context
+
+        base = [("a", "t1", "x"), ("b", "t2", "y")]
+        monkeypatch.setattr("embed.retrieve_vector_and_text", lambda *a, **k: base)
+
+        results = retrieve_with_context("query", "fake.npz", context_drug=None, top_k=2)
+        assert results == base
+
+    def test_context_drug_not_in_results(self, monkeypatch):
+        """context_drug 不在结果中时返回基础结果。"""
+        from embed import retrieve_with_context
+
+        base = [("心速宁胶囊", "性状", "x")]
+        monkeypatch.setattr("embed.retrieve_vector_and_text", lambda *a, **k: base)
+        monkeypatch.setattr("embed._score_result_by_drug_name", lambda d, t: 0)
+
+        results = retrieve_with_context("query", "fake.npz", context_drug="不存在", top_k=1)
+        assert results == base
+
+    def test_context_drug_exception_fallback(self, monkeypatch):
+        """匹配过程异常时返回基础结果，不抛异常。"""
+        from embed import retrieve_with_context
+
+        base = [("a", "t", "x")]
+        monkeypatch.setattr("embed.retrieve_vector_and_text", lambda *a, **k: base)
+        monkeypatch.setattr("embed._score_result_by_drug_name", lambda d, t: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        results = retrieve_with_context("query", "fake.npz", context_drug="a", top_k=1)
+        assert results == base

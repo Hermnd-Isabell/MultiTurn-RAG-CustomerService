@@ -429,6 +429,51 @@ def retrieve_vector_and_text_for_drug(input_data, embedding_file_path, target_dr
     return results
 
 
+def retrieve_with_context(input_data, embedding_file_path, context_drug=None, top_k=3):
+    """
+    带会话上下文的向量检索。
+
+    行为：
+    1. 调用 retrieve_vector_and_text 做基础向量检索（top_k 扩大到 15，给过滤留足够候选）
+    2. 如果 context_drug 非空，对结果做药品名优先过滤（doc_id 匹配 context_drug 的置顶）
+    3. 如果 context_drug 为空，直接返回基础检索结果截断到 top_k
+    4. 任何异常都捕获并返回基础检索结果
+
+    返回格式与 retrieve_vector_and_text 完全一致：[(doc_id, title, text), ...]
+    """
+    base_k = 15
+    try:
+        base_results = retrieve_vector_and_text(input_data, embedding_file_path, top_k=base_k)
+    except Exception as e:
+        print(f"[retrieve-with-context] 基础检索失败: {e}")
+        return []
+
+    if not context_drug:
+        # 无上下文药品，直接截断返回，零额外开销
+        return base_results[:top_k]
+
+    try:
+        matched = []
+        others = []
+        for r in base_results:
+            if _score_result_by_drug_name(r[0], context_drug):
+                matched.append(r)
+            else:
+                others.append(r)
+
+        if matched:
+            print(f"[retrieve-with-context] context_drug='{context_drug}' 命中 {len(matched)} 条，置顶")
+            results = matched + others
+        else:
+            print(f"[retrieve-with-context] context_drug='{context_drug}' 未命中，返回基础检索结果")
+            results = base_results
+
+        return results[:top_k]
+    except Exception as e:
+        print(f"[retrieve-with-context] 药品名过滤异常，返回基础结果: {e}")
+        return base_results[:top_k]
+
+
 def retrieve_drug_subsections(drug_name, target_fields, top_k=3):
     """
     通过 ES 精确查 doc_id=drug_name，获取该药品的全部子段落。
