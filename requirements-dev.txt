@@ -1,0 +1,5 @@
+# Test-only dependencies. Install via:
+#   .\venv\Scripts\pip install -r requirements-dev.txt
+# 业务运行依赖请仍走 requirements.txt，本文件只用于跑 pytest 套件。
+pytest>=7.0
+pytest-mock>=3.10

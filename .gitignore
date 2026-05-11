@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables / secrets
+.env
+
+# Elasticsearch binary distribution (bundled, large)
+elasticsearch-7.17.21/
+
+# Vector database files (large binaries, generated)
+*.npz
+
+# Test / cache artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary / diagnostic scripts (not part of core codebase)
+diagnose_retrieval.py
+inspect_npz.py
+smoke_p2_post_simplify.py
+diagnose_output.txt
+err.log
+qudanwan.txt
+nul
+
+# Source documents (large binaries; users provide their own)
+*.docx
+
+# Planning docs (optional; exclude to keep repo clean)
+implementation_plan.md
+rag_project_analysis.md
+
+# Old/excluded files
+test.py
+pkg/installed_packages.txt
+pkg/numpy_ver.txt
