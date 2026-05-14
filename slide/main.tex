@@ -1,0 +1,267 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+
+\usepackage{ctex}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{orange},
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10}
+}
+
+\title{MultiTurn-RAG-CustomerService}
+\subtitle{《中华人民共和国药典》智能问答系统架构梳理}
+\author{Hermnd-Isabell}
+\date{\today}
+
+\begin{document}
+
+% ========== 标题页 ==========
+\begin{frame}
+    \titlepage
+\end{frame}
+
+% ========== 目录 ==========
+\begin{frame}{目录}
+    \tableofcontents
+\end{frame}
+
+% ========== 1. 项目概述 ==========
+\section{项目概述}
+
+\begin{frame}{项目定位}
+    \textbf{MultiTurn-RAG-CustomerService} 是一个基于《中华人民共和国药典》的\\中文智能问答系统。
+    \vspace{0.5em}
+    \begin{itemize}
+        \item \textbf{R}etrieval: Elasticsearch + FAISS 双路检索
+        \item \textbf{A}ugmented: 检索结果作为 LLM 上下文
+        \item \textbf{G}eneration: OpenAI 兼容 API（默认 DeepSeek）生成回答
+        \item \textbf{MultiTurn}: 支持多轮对话、指代消解、会话上下文
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{核心数据流}
+    \centering
+    \begin{tabular}{ll}
+        \textbf{阶段} & \textbf{处理} \\
+        \hline
+        文档导入 & .docx $\rightarrow$ ES（整章）$\rightarrow$ FAISS（子段落） \\
+        用户提问 & 查询改写 $\rightarrow$ 意图路由 $\rightarrow$ 检索决策 \\
+        检索阶段 & ES 精确锁定（主路径）/ FAISS 向量检索（降级） \\
+        生成阶段 & 上下文组装 $\rightarrow$ LLM 流式回答 \\
+    \end{tabular}
+\end{frame}
+
+% ========== 2. 已实现功能 ==========
+\section{已实现功能}
+
+\begin{frame}{P0：基础架构}
+    \begin{block}{双路存储}
+        \begin{itemize}
+            \item \textbf{Elasticsearch}：存储整章原文，doc\_id = 药品名
+            \item \textbf{FAISS}：存储子段落向量（20857 条，384 维）
+            \item 同一份文档存两份，目的不同
+        \end{itemize}
+    \end{block}
+    \begin{block}{文档切分}
+        \begin{itemize}
+            \item 章节边界：检测 12pt 字体段落
+            \item 子段落：正则 \texttt{(?:【|t)(.+?)(?:】)} 提取标题和内容
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+\begin{frame}{P1：意图路由层}
+    \begin{enumerate}
+        \item \texttt{quick\_intent\_hint}：规则预筛
+        \begin{itemize}
+            \item obvious\_chitchat（闲聊短路）
+            \item obvious\_pharmacy（含字段关键词）
+            \item ambiguous（需 LLM 判断）
+        \end{itemize}
+        \item \texttt{classify\_pharmacy\_query}：LLM 二分类 good/bad
+        \item \texttt{MedicineInfoStandardizer}：
+        \begin{itemize}
+            \item 从问句提取 \texttt{target\_fields}（如「性状」「鉴别」）
+            \item 从问句提取 \texttt{target\_drug}（药品名）
+        \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}{P2：药品感知重排}
+    全局 FAISS 检索 top-10 后，做双层打分重排：
+    \vspace{0.5em}
+    \begin{equation*}
+        \text{total\_score} = \text{drug\_score} \times 2 + \text{field\_score} \times 1
+    \end{equation*}
+    \vspace{0.3em}
+    \begin{itemize}
+        \item \texttt{\_score\_result\_by\_drug\_name}：doc\_id 与目标药品名匹配（精确/包含）
+        \item \texttt{\_score\_result\_by\_fields}：段落 title 与 target\_fields 匹配
+        \item 匹配 $<$ 3 条时用向量相似度补足
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{P2.2：ES 精确锁定检索}
+    当 \texttt{target\_drug} 非空且 ES 中存在时：
+    \vspace{0.5em}
+    \begin{itemize}
+        \item \textbf{跳过}全库 FAISS 盲搜
+        \item 直接 \texttt{es.get(index, id=target\_drug)} 取整章原文
+        \item \texttt{extract\_subsections} 切分后按 \texttt{target\_fields} 过滤
+        \item 匹配字段置顶，其余子段落补足 top\_k
+    \end{itemize}
+    \vspace{0.5em}
+    \alert{效果}：「川射干的性状」直接命中【性状】段落，零漂移。
+\end{frame}
+
+\begin{frame}{P4.1：查询改写（Query Rewriting）}
+    解决多轮对话中的\textbf{指代消解}问题：
+    \vspace{0.5em}
+    \begin{itemize}
+        \item 规则预筛：已含药名 / 无指代词 $\rightarrow$ 跳过改写
+        \item 指代词集合：\{他, 她, 它, 这个药, 该药, 刚才, 上面, 之前, ...\}
+        \item 否则调用 LLM 结合最近 3 轮 history 做改写
+    \end{itemize}
+    \vspace{0.5em}
+    \begin{exampleblock}{示例}
+        Q1: 川射干的性状是什么？\\
+        Q2: \textbf{他的副作用是什么？} $\xrightarrow{\text{改写}}$ \textbf{川射干的副作用是什么？}
+    \end{exampleblock}
+\end{frame}
+
+\begin{frame}{P4.2：上下文感知检索}
+    \begin{block}{\texttt{retrieve\_with\_context}}
+        全库向量检索的\textbf{双保险}：
+        \begin{enumerate}
+            \item 基础检索 top-15（扩大候选池）
+            \item 如果 \texttt{context\_drug} 非空：
+            \begin{itemize}
+                \item 用 \texttt{\_score\_result\_by\_drug\_name} 做药品名硬过滤
+                \item 匹配结果置顶，不足时用基础结果补足
+            \end{itemize}
+            \item 任何异常降级为返回基础结果
+        \end{enumerate}
+    \end{block}
+\end{frame}
+
+\begin{frame}{P4.3：会话事实缓存}
+    模块级 \texttt{\_session\_facts} 字典（Gradio 进程隔离 = 会话隔离）：
+    \vspace{0.5em}
+    \begin{itemize}
+        \item \texttt{primary\_drug}：当前会话主要讨论药品
+        \item \texttt{queried\_fields}：已查询字段集合（去重）
+        \item \texttt{last\_intent}：上一轮意图
+        \item \texttt{drug\_history}：会话中所有药品（按时间顺序）
+    \end{itemize}
+    \vspace{0.5em}
+    作用：当前轮次提取不到药品名时，自动 fallback 到缓存值。
+\end{frame}
+
+\begin{frame}{测试覆盖}
+    \begin{itemize}
+        \item \texttt{tests/test\_config.py}：配置读取（17 个）
+        \item \texttt{tests/test\_embed.py}：嵌入/检索/字段提取（44 个）
+        \item \texttt{tests/test\_webrun.py}：slow\_echo 分支/重排/改写/缓存（33 个）
+        \item \texttt{tests/test\_drug\_aware\_rerank.py}：药品名打分/提取（18 个）
+    \end{itemize}
+    \vspace{0.5em}
+    \centering
+    \textbf{总计：128 个测试全部通过}
+\end{frame}
+
+% ========== 3. 实现机制详解 ==========
+\section{实现机制详解}
+
+\begin{frame}{检索决策流程图}
+    \centering
+    \small
+    \begin{tabular}{ll}
+        \textbf{条件} & \textbf{路径} \\
+        \hline
+        target\_drug $\neq$ None \&\& drug\_exists & \textbf{主路径}：ES 精确锁定 \\
+        target\_drug = None \&\& session\_drug $\neq$ None & \textbf{降级路径}：retrieve\_with\_context \\
+        target\_drug = None \&\& session\_drug = None & \textbf{降级路径}：FAISS 全库 top-3 \\
+        全库未命中目标药品 & \textbf{兜底}：retrieve\_vector\_and\_text\_for\_drug \\
+    \end{tabular}
+\end{frame}
+
+\begin{frame}{关键模块关系}
+    \centering
+    \begin{tabular}{lll}
+        \textbf{模块} & \textbf{职责} & \textbf{关键函数} \\
+        \hline
+        config.py & 全局配置单例 & \texttt{config.ES\_INDEX} \\
+        embed.py & 向量/ES/LLM 工具 & \texttt{retrieve\_with\_context} \\
+        webrun.py & Gradio UI + 主流程 & \texttt{slow\_echo} \\
+        tests/ & 回归测试 & pytest + MagicMock \\
+    \end{tabular}
+\end{frame}
+
+% ========== 4. 当前问题 ==========
+\section{当前问题与改进方向}
+
+\begin{frame}{已知问题（1/2）}
+    \begin{alertblock}{结构性问题}
+        \begin{itemize}
+            \item \textbf{向量语义漂移}：FAISS 只编码子段落\textit{内容}，不含药品名\\
+            $\Rightarrow$ 「川射干的性状」编码后失去「川射干」信号
+            \item \textbf{切分规则硬编码}：依赖 12pt 字体 + 固定正则\\
+            $\Rightarrow$ 非标准 .docx 无法正确分章
+            \item \textbf{模型不可切换}：Sentence-Transformer 固定加载\\
+            $\Rightarrow$ 无法根据场景换用更强模型
+        \end{itemize}
+    \end{alertblock}
+\end{frame}
+
+\begin{frame}{已知问题（2/2）}
+    \begin{alertblock}{工程性问题}
+        \begin{itemize}
+            \item \textbf{LLM 依赖}：改写/分类/字段提取均走外部 API\\
+            $\Rightarrow$ 延迟高、有失败风险、成本高
+            \item \textbf{会话状态易失}：\texttt{\_session\_facts} 是模块级变量\\
+            $\Rightarrow$ Gradio 进程重启即丢失
+            \item \textbf{无对话持久化}：没有数据库记录历史问答
+            \item \textbf{Windows-only}：启动脚本为 .bat，跨平台性差
+            \item \textbf{无权限管理}：配置页密码明文，无用户隔离
+        \end{itemize}
+    \end{alertblock}
+\end{frame}
+
+\begin{frame}{改进方向}
+    \begin{exampleblock}{短期}
+        \begin{itemize}
+            \item 向量库编码时 prepend 药品名（\texttt{[川射干] 本品为...}）
+            \item 引入本地小模型做意图分类（减少 LLM 调用）
+            \item 添加 SQLite 对话历史持久化
+        \end{itemize}
+    \end{exampleblock}
+    \begin{exampleblock}{中长期}
+        \begin{itemize}
+            \item 支持多药品对比查询
+            \item 动态 field\_list 扩展（用户自定义字段）
+            \item 跨平台启动脚本（sh + Docker）
+            \item 引入重排序模型（Cross-Encoder）替代规则打分
+        \end{itemize}
+    \end{exampleblock}
+\end{frame}
+
+% ========== 结束页 ==========
+\begin{frame}
+    \centering
+    \Huge 谢谢！
+    \vspace{1em}
+    \\
+    \normalsize
+    GitHub: \url{https://github.com/Hermnd-Isabell/MultiTurn-RAG-CustomerService}
+\end{frame}
+
+\end{document}
