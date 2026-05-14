@@ -64,6 +64,17 @@ nul
 implementation_plan.md
 rag_project_analysis.md
 
+# Windows / macOS system files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Claude Code working directories
+.claude/
+
+# All log files (catch-all)
+*.log
+
 # Old/excluded files
 test.py
 pkg/installed_packages.txt
