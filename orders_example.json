@@ -1,0 +1,43 @@
+[
+  {
+    "order_id": "ORD20250520001",
+    "user_phone": "13800138000",
+    "create_time": "2025-05-15T10:30:00",
+    "items": [
+      {
+        "sku_id": "SKU-2025-DRESS-001",
+        "product_name": "法式茶歇连衣裙",
+        "specs": {"color": "米白色", "size": "M"},
+        "price": 299.00,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "in_transit",
+      "carrier": "中通快递",
+      "tracking_no": "ZT1234567890",
+      "path": [
+        {"node": "杭州发货仓", "time": "2025-05-15T14:00:00", "weather": "晴, 28°C"},
+        {"node": "上海转运中心", "time": "2025-05-16T03:00:00", "weather": "多云, 26°C"}
+      ],
+      "estimated_arrival": "2025-05-20T18:00:00",
+      "current_location": "上海转运中心",
+      "abnormal_status": null,
+      "signed_time": null
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2025-05-27T23:59:59",
+      "exchange_inventory": {
+        "米白色": {"S": 5, "M": 3, "L": 0},
+        "藏青色": {"S": 10, "M": 10, "L": 10}
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  }
+]

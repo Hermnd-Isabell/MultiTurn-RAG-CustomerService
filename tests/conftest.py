@@ -25,6 +25,8 @@ PROJECT_ROOT = os.path.dirname(HERE)
 PKG_DIR = os.path.join(PROJECT_ROOT, "pkg")
 if PKG_DIR not in sys.path:
     sys.path.insert(0, PKG_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 # pkg/config.py 在 import 阶段就读取这些 env，给一组稳定的默认值
 os.environ.setdefault("ES_HOST", "localhost")
@@ -37,6 +39,10 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test-key")
 os.environ.setdefault("OPENAI_BASE_URL", "https://test.example.com/v1")
 os.environ.setdefault("LLM_MODEL", "test-model")
 os.environ.setdefault("VECTOR_DB_PATH", os.path.join(PROJECT_ROOT, "test_vector.npz"))
+os.environ.setdefault("PRODUCT_KB_PATH", os.path.join(PROJECT_ROOT, "products"))
+os.environ.setdefault("PRODUCT_INDEX_PATH", os.path.join(PROJECT_ROOT, "test_products.npz"))
+os.environ.setdefault("PRODUCT_META_PATH", os.path.join(PROJECT_ROOT, "test_product_meta.json"))
+os.environ.setdefault("ORDERS_JSON_PATH", os.path.join(PROJECT_ROOT, "test_orders.json"))
 os.environ.setdefault("ENABLE_INTENT_ROUTING", "1")
 
 
@@ -56,11 +62,19 @@ def _install_heavy_module_stubs() -> None:
     if "sentence_transformers" not in sys.modules:
         st_mod = types.ModuleType("sentence_transformers")
 
-        def _fake_encode(texts, convert_to_numpy=True):
+        def _fake_encode(texts, convert_to_numpy=True, normalize_embeddings=False):
             if isinstance(texts, str):
                 texts = [texts]
             # 任意稳定形状即可，下游只看 .shape 与 dtype
-            return np.zeros((len(texts), 384), dtype=np.float32)
+            arr = np.zeros((len(texts), 384), dtype=np.float32)
+            if normalize_embeddings:
+                # 给每个文本一个独特的稳定向量，避免 cosine=1 误判
+                for i in range(len(texts)):
+                    arr[i, i % 384] = 1.0
+                norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                norms[norms == 0] = 1.0
+                arr = arr / norms
+            return arr
 
         def _SentenceTransformer(*_args, **_kwargs):
             inst = MagicMock(name="FakeSentenceTransformer")
@@ -108,8 +122,11 @@ def _install_heavy_module_stubs() -> None:
         for name in [
             "Markdown", "Chatbot", "ChatInterface", "Interface",
             "File", "Textbox", "Button", "Checkbox",
+            "JSON", "Number", "Dataframe", "Radio", "Slider",
         ]:
             setattr(gr, name, MagicMock(name=f"gr.{name}"))
+        # gr.update 返回 dict，供条件渲染用
+        gr.update = lambda **kwargs: kwargs
         sys.modules["gradio"] = gr
 
     # ---- docx ------------------------------------------------------------------
@@ -198,6 +215,7 @@ def _reset_module_caches():
     embed._faiss_cache.clear()
     webrun._es_client = None
     webrun.history = []
+    webrun.clear_session_facts()
 
     yield
 
@@ -205,6 +223,7 @@ def _reset_module_caches():
     embed._faiss_cache.clear()
     webrun._es_client = None
     webrun.history = []
+    webrun.clear_session_facts()
 
 
 @pytest.fixture

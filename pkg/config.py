@@ -23,6 +23,13 @@ class Config:
     OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
     LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 
+    # E-commerce paths
+    PRODUCT_KB_PATH = os.getenv("PRODUCT_KB_PATH", os.path.join(BASE_DIR, "products"))
+    PRODUCT_INDEX_PATH = os.getenv("PRODUCT_INDEX_PATH", os.path.join(BASE_DIR, "products.npz"))
+    PRODUCT_META_PATH = os.getenv("PRODUCT_META_PATH", os.path.join(BASE_DIR, "product_meta.json"))
+    ORDERS_JSON_PATH = os.getenv("ORDERS_JSON_PATH", os.path.join(BASE_DIR, "orders", "orders.json"))
+    RETURN_WINDOW_DAYS = int(os.getenv("RETURN_WINDOW_DAYS", "7"))
+
     # Feature flags
     # 是否启用问答前置的意图路由层（regex 预筛 + LLM 分类 + 字段抽取）。
     # 关闭时 slow_echo 与 P1 行为完全一致；开启后会按 quick_intent_hint 的判断

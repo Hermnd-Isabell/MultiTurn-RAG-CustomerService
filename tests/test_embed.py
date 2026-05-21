@@ -425,6 +425,111 @@ class TestRetrieveDrugSubsections:
 # -----------------------------------------------------------------------------
 # retrieve_with_context（P4.2）
 # -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# E-commerce 意图识别（Phase 1）
+# ---------------------------------------------------------------------------
+class TestEcommerceIntent:
+    """quick_ecommerce_intent_hint + classify_ecommerce_intent 覆盖 5 大类 + chitchat + unknown。"""
+
+    # ---- quick_ecommerce_intent_hint ----
+
+    def test_chitchat(self):
+        from embed import quick_ecommerce_intent_hint
+
+        result = quick_ecommerce_intent_hint("你好")
+        assert isinstance(result, dict)
+        assert result["intent"] == "chitchat"
+        assert result["confidence"] == 1.0
+
+    def test_logistics_track(self):
+        from embed import quick_ecommerce_intent_hint
+
+        result = quick_ecommerce_intent_hint("快递到哪了")
+        assert result["intent"] == "logistics"
+        assert result["sub_intent"] == "track"
+
+    def test_goods_operation_return(self):
+        from embed import quick_ecommerce_intent_hint
+
+        result = quick_ecommerce_intent_hint("我要退货")
+        assert result["intent"] == "goods_operation"
+        assert result["sub_intent"] == "return"
+
+    def test_product_recommend_similar(self):
+        from embed import quick_ecommerce_intent_hint
+
+        result = quick_ecommerce_intent_hint("有类似款式吗")
+        assert result["intent"] == "product_recommend"
+        assert result["sub_intent"] == "similar_style"
+
+    def test_product_info_material(self):
+        from embed import quick_ecommerce_intent_hint
+
+        result = quick_ecommerce_intent_hint("什么材质")
+        assert result["intent"] == "product_info"
+        assert result["keywords"] == "material"
+
+    def test_ambiguous(self):
+        from embed import quick_ecommerce_intent_hint
+
+        result = quick_ecommerce_intent_hint("随便问问")
+        assert result == "ambiguous"
+
+    # ---- classify_ecommerce_intent ----
+
+    def test_classify_success(self):
+        from embed import classify_ecommerce_intent
+
+        fake_client = MagicMock(name="FakeLLM")
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = '{"intent":"product_info","sub_intent":null,"confidence":0.95,"keywords":"basic_info"}'
+        fake_client.chat.completions.create.return_value = fake_response
+
+        result = classify_ecommerce_intent("多少钱", client=fake_client)
+        assert result["intent"] == "product_info"
+        assert result["confidence"] == 0.95
+        assert result["keywords"] == "basic_info"
+
+    def test_classify_low_confidence_becomes_unknown(self):
+        from embed import classify_ecommerce_intent
+
+        fake_client = MagicMock(name="FakeLLM")
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = '{"intent":"product_info","confidence":0.3}'
+        fake_client.chat.completions.create.return_value = fake_response
+
+        result = classify_ecommerce_intent("xxx", client=fake_client)
+        assert result["intent"] == "unknown"
+        assert result["confidence"] == 0.3
+
+    def test_classify_parse_failure_returns_unknown(self):
+        from embed import classify_ecommerce_intent
+
+        fake_client = MagicMock(name="FakeLLM")
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = "not json at all"
+        fake_client.chat.completions.create.return_value = fake_response
+
+        result = classify_ecommerce_intent("xxx", client=fake_client)
+        assert result["intent"] == "unknown"
+        assert result["confidence"] == 0.0
+
+    def test_classify_invalid_intent_filtered(self):
+        from embed import classify_ecommerce_intent
+
+        fake_client = MagicMock(name="FakeLLM")
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock()]
+        fake_response.choices[0].message.content = '{"intent":"hacker","confidence":0.99}'
+        fake_client.chat.completions.create.return_value = fake_response
+
+        result = classify_ecommerce_intent("xxx", client=fake_client)
+        assert result["intent"] == "unknown"
+
+
 class TestRetrieveWithContext:
     """带会话上下文的向量检索：药品名优先过滤。"""
 

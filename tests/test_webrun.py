@@ -59,11 +59,11 @@ class TestSlowEchoBranches:
         return chunks[-1] if chunks else ""
 
     def test_missing_npz_skips_retrieval_and_calls_llm(self, tmp_path, restore_config):
-        """VECTOR_DB_PATH 不存在时应跳过检索，直接走 LLM 自由问答。"""
+        """PRODUCT_INDEX_PATH 不存在时应跳过检索，直接走 LLM 自由问答。"""
         import webrun
 
         # 关键：必须改 webrun.config（slow_echo 闭包看到的 config 单例）
-        webrun.config.VECTOR_DB_PATH = str(tmp_path / "definitely_missing.npz")
+        webrun.config.PRODUCT_INDEX_PATH = str(tmp_path / "definitely_missing.npz")
         webrun.config.ENABLE_INTENT_ROUTING = False
 
         fake_client = _patch_streaming_llm(webrun)
@@ -84,15 +84,15 @@ class TestSlowEchoBranches:
         assert user_msg["content"] == "anything"
 
     def test_routing_disabled_skips_intent_layer(self, sample_faiss_data, restore_config):
-        """ENABLE_INTENT_ROUTING=False 时 quick_intent_hint / classify 都不应被调用。"""
+        """ENABLE_INTENT_ROUTING=False 时 quick_ecommerce_intent_hint / classify 都不应被调用。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = False
 
         fake_client = _patch_streaming_llm(webrun)
-        with patch.object(webrun, "quick_intent_hint") as mock_hint, \
-             patch.object(webrun, "classify_pharmacy_query") as mock_classify, \
+        with patch.object(webrun, "quick_ecommerce_intent_hint") as mock_hint, \
+             patch.object(webrun, "classify_ecommerce_intent") as mock_classify, \
              patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
@@ -105,15 +105,15 @@ class TestSlowEchoBranches:
         fake_client.chat.completions.create.assert_called_once()
 
     def test_obvious_chitchat_skips_classify_and_extract(self, sample_faiss_data, restore_config):
-        """命中 obvious_chitchat 时 classify 和 extract 都不应触发，省 2 次 LLM。"""
+        """命中 chitchat 时 classify 不应触发，省 1 次 LLM。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = True
 
         fake_client = _patch_streaming_llm(webrun)
-        with patch.object(webrun, "quick_intent_hint", return_value="obvious_chitchat") as mock_hint, \
-             patch.object(webrun, "classify_pharmacy_query") as mock_classify, \
+        with patch.object(webrun, "quick_ecommerce_intent_hint", return_value={"intent": "chitchat", "sub_intent": None, "keywords": None, "confidence": 1.0}) as mock_hint, \
+             patch.object(webrun, "classify_ecommerce_intent") as mock_classify, \
              patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
@@ -123,76 +123,69 @@ class TestSlowEchoBranches:
         mock_classify.assert_not_called()
         mock_std_cls.assert_not_called()
 
-    def test_obvious_pharmacy_skips_classify_but_calls_extract(self, sample_faiss_data, restore_config):
-        """命中 obvious_pharmacy 时跳过 classify，直接走 extract_target_fields，省 1 次 LLM。"""
+    def test_product_info_skips_classify(self, sample_faiss_data, restore_config):
+        """命中 product_info 时跳过 classify_ecommerce_intent，直接走商品 RAG。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = True
 
-        fake_standardizer = MagicMock(name="FakeStandardizer")
-        fake_standardizer.extract_target_fields.return_value = ["性状"]
-
         fake_client = _patch_streaming_llm(webrun)
-        with patch.object(webrun, "quick_intent_hint", return_value="obvious_pharmacy"), \
-             patch.object(webrun, "classify_pharmacy_query") as mock_classify, \
-             patch.object(webrun, "MedicineInfoStandardizer", return_value=fake_standardizer) as mock_std_cls, \
-             patch.object(webrun, "retrieve_vector_and_text", return_value=[("d1", "性状", "白色粉末")]), \
+        with patch.object(webrun, "quick_ecommerce_intent_hint", return_value={"intent": "product_info", "sub_intent": None, "keywords": "material", "confidence": 1.0}), \
+             patch.object(webrun, "classify_ecommerce_intent") as mock_classify, \
+             patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
+             patch.object(webrun, "retrieve_vector_and_text", return_value=[("d1", "材质", "100%棉")]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
-            self._run_slow_echo(webrun, message="当归的性状")
+            self._run_slow_echo(webrun, message="什么材质")
 
-        mock_classify.assert_not_called(), "obvious_pharmacy 必须跳过 classify"
-        mock_std_cls.assert_called_once()
-        fake_standardizer.extract_target_fields.assert_called_once_with("当归的性状")
+        mock_classify.assert_not_called(), "product_info 必须跳过 classify"
+        mock_std_cls.assert_not_called()
 
-    def test_ambiguous_good_calls_classify_and_extract(self, sample_faiss_data, restore_config):
-        """ambiguous + classify=good：应当先后调用 classify 与 extract。"""
+    def test_ambiguous_calls_classify(self, sample_faiss_data, restore_config):
+        """ambiguous + classify=product_info：应当调用 classify_ecommerce_intent。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = True
 
-        fake_standardizer = MagicMock(name="FakeStandardizer")
-        fake_standardizer.extract_target_fields.return_value = ["功能主治"]
-
         fake_client = _patch_streaming_llm(webrun)
-        with patch.object(webrun, "quick_intent_hint", return_value="ambiguous"), \
-             patch.object(webrun, "classify_pharmacy_query", return_value="good") as mock_classify, \
-             patch.object(webrun, "MedicineInfoStandardizer", return_value=fake_standardizer), \
-             patch.object(webrun, "retrieve_vector_and_text", return_value=[("d1", "功能主治", "解表")]), \
+        with patch.object(webrun, "quick_ecommerce_intent_hint", return_value="ambiguous"), \
+             patch.object(webrun, "classify_ecommerce_intent", return_value={"intent": "product_info", "sub_intent": None, "keywords": "basic_info", "confidence": 0.9}) as mock_classify, \
+             patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
+             patch.object(webrun, "retrieve_vector_and_text", return_value=[("d1", "基础信息", "价格299")]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
-            self._run_slow_echo(webrun, message="它能治什么")
+            self._run_slow_echo(webrun, message="这个多少钱")
 
         mock_classify.assert_called_once()
-        fake_standardizer.extract_target_fields.assert_called_once()
+        mock_std_cls.assert_not_called()
 
-    def test_ambiguous_bad_skips_extract(self, sample_faiss_data, restore_config):
-        """ambiguous + classify=bad：不应触发 extract_target_fields，target_fields=[]。"""
+    def test_ambiguous_unknown_skips_rerank(self, sample_faiss_data, restore_config):
+        """ambiguous + classify=unknown：不应触发 MedicineInfoStandardizer，走通用兜底。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = True
 
         fake_client = _patch_streaming_llm(webrun)
-        with patch.object(webrun, "quick_intent_hint", return_value="ambiguous"), \
-             patch.object(webrun, "classify_pharmacy_query", return_value="bad") as mock_classify, \
+        with patch.object(webrun, "quick_ecommerce_intent_hint", return_value="ambiguous"), \
+             patch.object(webrun, "classify_ecommerce_intent", return_value={"intent": "unknown", "sub_intent": None, "keywords": None, "confidence": 0.0}) as mock_classify, \
              patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             self._run_slow_echo(webrun)
 
         mock_classify.assert_called_once()
-        mock_std_cls.assert_not_called(), "classify=bad 时必须跳过 extract"
+        mock_std_cls.assert_not_called(), "unknown 时必须跳过 MedicineInfoStandardizer"
 
     def test_intent_layer_exception_falls_back_gracefully(self, sample_faiss_data, restore_config):
-        """quick_intent_hint 抛异常时主流程不应中断，最终仍能拿到 LLM 流式返回。"""
+        """quick_ecommerce_intent_hint 抛异常时主流程不应中断，最终仍能拿到 LLM 流式返回。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = True
 
         fake_client = _patch_streaming_llm(webrun)
-        with patch.object(webrun, "quick_intent_hint", side_effect=RuntimeError("boom")), \
+        with patch.object(webrun, "quick_ecommerce_intent_hint", side_effect=RuntimeError("boom")), \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[("d1", "X", "Y")]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             chunks = list(webrun.slow_echo("anything", []))
@@ -202,14 +195,14 @@ class TestSlowEchoBranches:
         assert not chunks[-1].startswith("Error:"), f"不应进 LLM 调用失败分支：{chunks[-1]!r}"
 
     def test_retrieval_exception_yields_no_context_message(self, sample_faiss_data, restore_config):
-        """retrieve_vector_and_text 抛错时仍应正常调用 LLM（context = 'No context found'）。"""
+        """retrieve_with_context 抛错时仍应正常调用 LLM（context = 'No context found'）。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = False
 
         fake_client = _patch_streaming_llm(webrun)
-        with patch.object(webrun, "retrieve_vector_and_text", side_effect=RuntimeError("faiss boom")), \
+        with patch.object(webrun, "retrieve_with_context", side_effect=RuntimeError("faiss boom")), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             chunks = list(webrun.slow_echo("anything", []))
 
@@ -224,7 +217,7 @@ class TestSlowEchoBranches:
         """Gradio 6.x 使用 openai-style MessageDict 列表作为 history，slow_echo 应正确解析。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = False
 
         fake_client = _patch_streaming_llm(webrun)
@@ -233,7 +226,7 @@ class TestSlowEchoBranches:
             # Gradio 6.x 格式：dict 列表
             history = [
                 {"role": "user", "content": "你好"},
-                {"role": "assistant", "content": "你好！我是药典助手。"},
+                {"role": "assistant", "content": "你好！我是电商客服助手。"},
             ]
             chunks = list(webrun.slow_echo("再见", history))
 
@@ -249,7 +242,7 @@ class TestSlowEchoBranches:
         """enable_thinking=False 时应在 LLM 请求中附加 extra_body 禁用思考。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = False
 
         fake_client = _patch_streaming_llm(webrun)
@@ -268,7 +261,7 @@ class TestSlowEchoBranches:
         """enable_thinking=True 且流式返回包含 reasoning_content 时应输出思考过程。"""
         import webrun
 
-        webrun.config.VECTOR_DB_PATH = sample_faiss_data
+        webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
         webrun.config.ENABLE_INTENT_ROUTING = False
 
         def _stream_with_reasoning(*_args, **_kwargs):
