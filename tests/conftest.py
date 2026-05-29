@@ -123,6 +123,7 @@ def _install_heavy_module_stubs() -> None:
             "Markdown", "Chatbot", "ChatInterface", "Interface",
             "File", "Textbox", "Button", "Checkbox",
             "JSON", "Number", "Dataframe", "Radio", "Slider",
+            "State",
         ]:
             setattr(gr, name, MagicMock(name=f"gr.{name}"))
         # gr.update 返回 dict，供条件渲染用
@@ -253,27 +254,20 @@ def mock_openai_client():
 def sample_faiss_data(tmp_path):
     """
     构造一份合法的 .npz 文件并返回路径，用于 retrieve_vector_and_text 端到端流转。
-    内容：3 条 (doc_id, title, text)。
+    内容：3 条电商格式 (sku_id|module|sub_module, module, sub_module, text)。
     """
     npz_path = tmp_path / "fake.npz"
     embeddings = np.zeros((3, 384), dtype=np.float32)
-    ids = np.array(["drug_a", "drug_b", "drug_c"])
-    texts = np.array([("性状", "白色粉末"), ("功能主治", "解表"), ("处方", "板蓝根")], dtype=object)
+    ids = np.array(["TX2026001|基础信息|", "CS2026001|规格材质|", "NZ2026001|规格材质|"])
+    texts = np.array([
+        ("基础信息", "", "名称：云感T恤\n编号：TX2026001"),
+        ("规格材质", "", "面料成分：100%棉\n颜色：白色"),
+        ("规格材质", "", "面料成分：牛仔布\n颜色：蓝色"),
+    ], dtype=object)
     np.savez_compressed(
         npz_path,
         embeddings=embeddings,
         ids=ids,
         texts=texts,
-        es_index_name=np.array("zhyd"),
-        es_fingerprint=np.array("deadbeef"),
     )
     return str(npz_path)
-
-
-@pytest.fixture
-def sample_hits():
-    """构造一组 ES 查询结果，用于 _es_index_fingerprint / process_and_vectorize 测试。"""
-    return [
-        {"_id": "drug_a", "_source": {"content": "【性状】白色粉末\n【功能主治】解表"}},
-        {"_id": "drug_b", "_source": {"content": "【处方】板蓝根 1500g"}},
-    ]

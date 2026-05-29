@@ -1,28 +1,17 @@
 import time
 import os
-import docx
 import re
-from elasticsearch import Elasticsearch, exceptions
 import gradio as gr
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from embed import (
-    MedicineInfoStandardizer,
-    classify_pharmacy_query,
     connect_elasticsearch,
-    extract_drug_info,
-    extract_subsections,
-    process_and_vectorize,
-    verify_data_in_elasticsearch,
     retrieve_vector_and_text,
-    retrieve_vector_and_text_for_drug,
-    retrieve_drug_subsections,
     retrieve_with_context,
     retrieve_product_info,
     get_openai_client,
     clear_openai_client_cache,
-    quick_intent_hint,
-    _score_result_by_drug_name,
+    _score_result_by_product_name,
     quick_ecommerce_intent_hint,
     classify_ecommerce_intent,
     model,
@@ -64,12 +53,11 @@ _MODIFY_TYPE_LABELS = {
 }
 
 _session_facts = {
-    "primary_drug": None,       # 当前会话主要讨论的药品（药典兼容）
+    "primary_product": None,    # 当前会话主要讨论的商品
     "queried_fields": set(),    # 已查询过的字段集合
     "last_intent": None,        # 上一轮意图
     "last_sub_intent": None,    # 上一轮子意图（电商）
     "keywords": None,           # product_info 的模块映射（电商）
-    "drug_history": [],         # 本轮会话提到过的所有药品（按时间顺序，去重）
     "verified_identity": False, # 是否已验证身份（电商）
     "bound_order_id": None,     # 已绑定的订单号（电商）
     "bound_phone": None,        # 已绑定的手机号（电商）
@@ -90,13 +78,13 @@ _session_facts = {
 }
 
 
-def _update_session_facts(target_drug=None, target_fields=None, intent_hint=None, sub_intent=None, keywords=None, purchase_stage=None):
-    """每轮问答结束后更新会话事实缓存。兼容药典旧参数与电商新参数。"""
+def _update_session_facts(target_product=None, target_fields=None, intent_hint=None, sub_intent=None, keywords=None, purchase_stage=None):
+    """每轮问答结束后更新会话事实缓存。"""
     global _session_facts
-    if target_drug:
-        _session_facts["primary_drug"] = target_drug
-        if target_drug not in _session_facts["drug_history"]:
-            _session_facts["drug_history"].append(target_drug)
+    if target_product:
+        _session_facts["primary_product"] = target_product
+        if target_product not in _session_facts["product_history"]:
+            _session_facts["product_history"].append(target_product)
     if target_fields:
         _session_facts["queried_fields"].update(target_fields)
     if intent_hint is not None:
@@ -109,9 +97,50 @@ def _update_session_facts(target_drug=None, target_fields=None, intent_hint=None
         _session_facts["purchase_stage"] = purchase_stage
 
 
-def get_session_drug():
-    """获取当前会话的主要药品，供指代消解和检索层使用。"""
-    return _session_facts.get("primary_drug")
+def get_session_product():
+    """获取当前会话的主要商品，供指代消解和检索层使用。"""
+    return _session_facts.get("primary_product")
+
+
+def _extract_sku_from_message(message):
+    """从用户输入中提取 SKU 编号（如 TX2026001、CSQ-2026001）。"""
+    if not message:
+        return None
+    import re
+    # 匹配常见 SKU 格式：2-4 位字母 + 4-6 位数字，可带连字符
+    m = re.search(r"\b([A-Z]{2,4}[0-9]{4,}(?:-[A-Z0-9]+)?)\b", message.upper())
+    if m:
+        return m.group(1)
+    return None
+
+
+def _infer_primary_product(results, user_message=None):
+    """
+    从检索结果或用户输入中推断主要商品 sku_id。
+    优先从用户输入中提取显式 SKU；若无，则从检索结果取 plurality。
+    doc_id 格式通常为 sku_id|module|sub_module。
+    返回 sku_id 字符串，无法推断时返回 None。
+    """
+    # 1. 优先从用户输入中提取 SKU
+    if user_message:
+        explicit_sku = _extract_sku_from_message(user_message)
+        if explicit_sku:
+            print(f"[infer-product] 从用户输入提取 SKU: {explicit_sku}")
+            return explicit_sku
+
+    # 2. 从检索结果取 plurality
+    if not results:
+        return None
+    from collections import Counter
+    sku_ids = []
+    for doc_id, _, _ in results:
+        if isinstance(doc_id, str) and "|" in doc_id:
+            sku_ids.append(doc_id.split("|")[0])
+    if not sku_ids:
+        return None
+    most_common, count = Counter(sku_ids).most_common(1)[0]
+    print(f"[infer-product] 从检索结果推断主要商品: {most_common} ({count}/{len(results)})")
+    return most_common
 
 
 def get_session_fields():
@@ -123,12 +152,11 @@ def clear_session_facts():
     """重置会话事实（如用户点击'清空对话'时调用）。"""
     global _session_facts
     _session_facts = {
-        "primary_drug": None,
+        "primary_product": None,
         "queried_fields": set(),
         "last_intent": None,
         "last_sub_intent": None,
         "keywords": None,
-        "drug_history": [],
         "verified_identity": False,
         "bound_order_id": None,
         "bound_phone": None,
@@ -164,54 +192,9 @@ def clear_es_cache():
     _es_client = None
 
 
-def _extract_drug_name_from_query(input_data, standardizer=None):
-    """从用户查询中提取药品名。
-    复用 MedicineInfoStandardizer.standardize_information + extract_drug_info 解析。
-    :param input_data: 用户输入的问题字符串。
-    :param standardizer: 可选的 MedicineInfoStandardizer 实例；若传入则复用，避免重复创建。
-    :return: 药品名字符串，解析失败或不存在时返回 None。
-    """
-    if not input_data or not input_data.strip():
-        return None
-    try:
-        if standardizer is None:
-            standardizer = MedicineInfoStandardizer(llm=get_openai_client())
-        raw = standardizer.standardize_information(input_data)
-    except Exception as e:
-        print(f"[extract_drug_name] standardize_information 调用失败: {e}")
-        return None
-    try:
-        drugs, _ = extract_drug_info(raw)
-    except Exception as e:
-        print(f"[extract_drug_name] 解析 LLM 输出失败: {e}")
-        return None
-    if drugs:
-        return drugs[0].strip()
-    return None
-
-
-def _confirm_drug_in_es(drug_name):
-    """用 ES 精确查询确认药品名是否存在。
-    ES 的 doc_id 就是药品名（章节标题），所以直接用 .get() 查 _id。
-    :param drug_name: 要确认的药品名。
-    :return: bool，存在返回 True，否则 False。
-    """
-    if not drug_name:
-        return False
-    es_instance = get_es_client()
-    if es_instance is None:
-        return False
-    try:
-        res = es_instance.get(index=config.ES_INDEX, id=drug_name, ignore=[404])
-        return res.get('found', False)
-    except Exception as e:
-        print(f"[es-confirm] 查询药品 '{drug_name}' 失败: {e}")
-        return False
-
-
 # 指代词集合：用于判断当前问题是否需要结合历史对话做改写
 _PRONOUNS = {
-    '他', '她', '它', '这个药', '该药', '此药', '刚才', '上面', '之前',
+    '他', '她', '它', '这个商品', '该商品', '此商品', '刚才', '上面', '之前',
     '之前那个', '刚才那个', '这个', '那个', '其'
 }
 
@@ -219,19 +202,28 @@ _PRONOUNS = {
 def _format_history(history, max_turns=3):
     """
     把 Gradio 的 history 列表格式化为文本。
-    history 格式：[(user_msg, assistant_msg), ...]
+    兼容 messages 格式：{"role": "user"/"assistant", "content": ...}
     只取最近 max_turns 轮，避免 prompt 过长。
     """
     if not history:
         return ""
     lines = []
-    for item in history[-max_turns:]:
+    for item in history[-max_turns * 2:]:
         try:
-            user_msg, bot_msg = item
-            lines.append(f"User: {user_msg}")
-            # 截断助手回复避免 prompt 过长
-            bot_snip = bot_msg[:200] if bot_msg else ""
-            lines.append(f"Assistant: {bot_snip}...")
+            if isinstance(item, dict):
+                role = item.get("role")
+                content = item.get("content", "")
+                if role == "user":
+                    lines.append(f"User: {content}")
+                elif role == "assistant":
+                    bot_snip = content[:200] if content else ""
+                    lines.append(f"Assistant: {bot_snip}...")
+            else:
+                user_msg, bot_msg = item
+                lines.append(f"User: {user_msg}")
+                # 截断助手回复避免 prompt 过长
+                bot_snip = bot_msg[:200] if bot_msg else ""
+                lines.append(f"Assistant: {bot_snip}...")
         except Exception:
             continue
     return "\n".join(lines)
@@ -242,32 +234,21 @@ def _rewrite_query_with_history(current_message, history, llm_client):
     结合对话历史，把包含指代词的当前问题改写成独立、完整的问题。
 
     规则：
-    1. 如果 current_message 中已包含药品名（_extract_drug_name_from_query 能提取到），
-       说明问题已自包含，无需改写，直接返回原消息。
-    2. 如果 current_message 中不含任何指代词，直接返回原消息。
-    3. 否则，调用 LLM 结合 history 做改写。
+    1. 如果 current_message 中不含任何指代词，直接返回原消息。
+    2. 否则，调用 LLM 结合 history 做改写。
 
     返回：改写后的字符串（或原字符串）。
     """
     if not current_message or not current_message.strip():
         return current_message
 
-    # 规则 1：已含药品名 → 自包含，跳过
-    try:
-        existing_drug = _extract_drug_name_from_query(current_message)
-        if existing_drug:
-            print(f"[query-rewrite] 消息已含药品名 '{existing_drug}'，跳过改写")
-            return current_message
-    except Exception:
-        pass
-
-    # 规则 2：不含指代词 → 跳过
+    # 规则 1：不含指代词 → 跳过
     text = current_message.strip()
     has_pronoun = any(p in text for p in _PRONOUNS)
     if not has_pronoun:
         return current_message
 
-    # 规则 3：调用 LLM 改写
+    # 规则 2：调用 LLM 改写
     if not history:
         return current_message
 
@@ -275,7 +256,7 @@ def _rewrite_query_with_history(current_message, history, llm_client):
     rewrite_prompt = f"""你是一个对话理解助手。请根据以下对话历史，把用户的当前问题改写成独立、完整的问题（消除指代词）。
 
 要求：
-- 如果当前问题包含"他/她/它/这个药/该药/此药/刚才/上面/之前"等指代词，请根据历史对话确定指代对象，并替换为具体名称。
+- 如果当前问题包含"他/她/它/这个商品/该商品/此商品/刚才/上面/之前"等指代词，请根据历史对话确定指代对象，并替换为具体名称。
 - 改写后的问题必须是一个完整的、不依赖上下文也能理解的问题。
 - 只输出改写后的问题，不要解释，不要加引号。
 - 如果当前问题已经完整（不含指代词），请原样输出。
@@ -293,7 +274,6 @@ def _rewrite_query_with_history(current_message, history, llm_client):
         response = llm_client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=[{"role": "user", "content": rewrite_prompt}],
-            temperature=0.0,
         )
         rewritten = response.choices[0].message.content.strip() if response.choices else ""
         if rewritten and rewritten != current_message:
@@ -311,9 +291,13 @@ def update_config(es_host, es_port, es_user, es_pass, es_index, vector_db, es_sc
     """
     更新配置信息
     """
+    from embed import clear_faiss_cache
     # Simply update the in-memory config object for this session
     config.ES_HOST = es_host
-    config.ES_PORT = int(es_port)
+    try:
+        config.ES_PORT = int(es_port)
+    except (ValueError, TypeError):
+        config.ES_PORT = 9200
     config.ES_USER = es_user
     config.ES_PASSWORD = es_pass
     config.ES_INDEX = es_index
@@ -322,113 +306,8 @@ def update_config(es_host, es_port, es_user, es_pass, es_index, vector_db, es_sc
     # 配置变更后清除缓存：ES 与 OpenAI 客户端下次访问按新配置重连/重建
     clear_es_cache()
     clear_openai_client_cache()
+    clear_faiss_cache()
     return "配置已更新! (注意: 重启后将重置为配置文件默认值)"
-
-class UploadDoc:# 上传文档类
-    
-    def __init__(self, file_input):#初始化类的实例
-        self.file_input = file_input  # Path to the uploaded file
-        # Use config values
-        self.es_host = config.ES_HOST
-        self.es_port = config.ES_PORT
-        self.es_user = config.ES_USER
-        self.es_pass = config.ES_PASSWORD
-        self.es_index = config.ES_INDEX
-        self.es_scheme = config.ES_SCHEME
-
-
-    def clean_filename(self,filename):#从文件名中提取中文字符并去除末尾的空格
-        return ''.join(re.findall(r'[\u4e00-\u9fff]+', filename)).rstrip()
-
-    # ... (methods extract_titles_and_content, connect_elasticsearch, store_in_elasticsearch remain similar but we can clean them up if needed, but for now we focus on config)
-    
-    def extract_titles_and_content(self, doc_obj):#从 Word 文档对象中提取标题和内容，并将其存储在一个字典中。
-        content_dict = {}
-        temp_doc = []
-
-        for paragraph in doc_obj.paragraphs:
-            if not paragraph.runs:
-                continue
-                
-            font_size = paragraph.runs[0].font.size
-            if font_size is not None:
-                # print(f"Font size: {font_size.pt}, Type: {type(font_size.pt)}")
-                if isinstance(font_size.pt, (int, float)):
-                    if font_size.pt == 12:
-                        if temp_doc:
-                            title = self.clean_filename(temp_doc[0])
-                            if title:
-                                content_dict[title] = temp_doc
-                            temp_doc = []
-            temp_doc.append(paragraph.text)
-
-        if temp_doc:
-            title = self.clean_filename(temp_doc[0])
-            if title:
-                content_dict[title] = temp_doc
-
-        return content_dict
-
-    def store_in_elasticsearch(self, content_dict):#将内容存入es
-        # print(f"Content dict to store: {content_dict}")
-        # 直接走模块级的懒加载客户端，避免在类内再包一层一行 wrapper（同时屏蔽与 embed.connect_elasticsearch 的同名歧义）
-        es_instance = get_es_client()
-        if es_instance is None:
-            print("无法存储：Elasticsearch 未就绪，请先启动 ES 服务")
-            return
-        for title, content in content_dict.items():
-            try:
-                es_instance.index(index=self.es_index, id=title, body={'content': '\n'.join(content)})
-                print(f"已存储: {title}到{self.es_index}")
-            except exceptions.ConnectionError as e:
-                print(f"连接错误：{e}")
-            except exceptions.TransportError as e:
-                print(f"存储错误：{e}")
-
-    def split_and_index_doc(self):#将文档分割成篇章，然后调用存储到es函数存入
-        if not os.path.exists(self.file_input):
-            print(f"文件 {self.file_input} 不存在。")
-            return
-
-        try:
-            doc_obj = docx.Document(self.file_input)
-            content_dict = self.extract_titles_and_content(doc_obj)
-            self.store_in_elasticsearch(content_dict)
-            print(f"已将 {len(content_dict)} 篇章存入 Elasticsearch")
-        except Exception as e:
-            print(f"处理文件时出错：{e}")
-
-    def upload_doc(self, index_name, vector_db_path): #提交
-        self.es_index = index_name
-        self.split_and_index_doc()
-        # vector_db_path = f"{vector_db_path}/{index_name}.npz" # This logic seems weird in original code, it appended filename to path?
-        # If vector_db_path is a directory, append filename. If it's a file, use it?
-        # Original: vector_db_path = f"{vector_db_path}/{index_name}.npz"
-        # Let's assume input is directory if it has no extension, or we stick to original logic but make it robust
-        if not vector_db_path.endswith('.npz'):
-             vector_db_path = os.path.join(vector_db_path, f"{index_name}.npz")
-
-        # 用户重新上传文档时，ES 索引刚刚被刷新，必须强制重建 FAISS 以保持同步
-        process_and_vectorize(index_name, vector_db_path, force_rebuild=True)
-
-def import_new_documents(uploaded_file, index_name, vector_db_path_input):# 上传文档
-    if uploaded_file is not None: 
-        file_input = uploaded_file.name  # 获取上传文件的路径
-        
-        # Build the actual npz path
-        if not vector_db_path_input.endswith('.npz'):
-            actual_npz = os.path.join(vector_db_path_input, f"{index_name}.npz")
-        else:
-            actual_npz = vector_db_path_input
-        
-        config.VECTOR_DB_PATH = actual_npz
-        config.ES_INDEX = index_name
-        
-        uploader = UploadDoc(file_input=file_input)
-        uploader.upload_doc(index_name, vector_db_path_input)
-        return f"文档上传成功，向量库路径: {actual_npz}"  
-    else:
-        return "没有上传文件"  
 
 def _score_result_by_fields(title, target_fields):
     """检索结果与 target_fields 的匹配度评分。
@@ -558,13 +437,14 @@ def _handle_logistics_track(order, message, history, llm_client):
 预计到达：{logistics.get('estimated_arrival', '未知')}
 
 请用自然语言向用户描述物流进度，包含当前位置和预计时间。
-如果路径中有天气信息，请一并描述。保持简洁友好。"""
+如果路径中有天气信息，请一并描述。保持简洁友好。
+
+重要：直接输出一段回复给用户即可，不要输出多个版本，不要标注"版本一/版本二"等字样，不要附加使用建议或小贴士。"""
 
     try:
         response = llm_client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
         )
         return response.choices[0].message.content.strip() if response.choices else "物流信息查询成功，但生成回复失败。"
     except Exception as e:
@@ -585,23 +465,31 @@ def _handle_logistics_abnormal(order, message, history, llm_client):
 当前位置：{logistics.get('current_location', '未知')}
 预计到达：{logistics.get('estimated_arrival', '未知')}
 
-请生成安抚话术，告知用户订单正常，请耐心等待。"""
+请生成安抚话术，告知用户订单正常，请耐心等待。
+
+重要：直接输出一段回复给用户即可，不要输出多个版本，不要标注"版本一/版本二"等字样，不要附加使用建议或小贴士。"""
     elif abnormal == "delay":
         prompt = f"""用户订单 {order.get('order_id')} 包裹目前延误。
 预计到达时间：{logistics.get('estimated_arrival', '未知')}
 当前位置：{logistics.get('current_location', '未知')}
 
-请生成安抚话术，说明延误情况并表达歉意。"""
+请生成安抚话术，说明延误情况并表达歉意。
+
+重要：直接输出一段回复给用户即可，不要输出多个版本，不要标注"版本一/版本二"等字样，不要附加使用建议或小贴士。"""
     elif abnormal == "lost":
         prompt = f"""用户订单 {order.get('order_id')} 包裹确认丢失。
 我们将为用户办理自动赔付。
 
-请生成说明话术，告知用户赔付流程和预计到账时间。"""
+请生成说明话术，告知用户赔付流程和预计到账时间。
+
+重要：直接输出一段回复给用户即可，不要输出多个版本，不要标注"版本一/版本二"等字样，不要附加使用建议或小贴士。"""
     elif abnormal == "damaged":
         prompt = f"""用户订单 {order.get('order_id')} 包裹存在损坏。
 用户可以选择补发或退款。
 
-请生成说明话术，并询问用户希望选择补发还是退款。"""
+请生成说明话术，并询问用户希望选择补发还是退款。
+
+重要：直接输出一段回复给用户即可，不要输出多个版本，不要标注"版本一/版本二"等字样，不要附加使用建议或小贴士。"""
     else:
         return "您的订单状态未知，请联系人工客服处理。"
 
@@ -609,7 +497,6 @@ def _handle_logistics_abnormal(order, message, history, llm_client):
         response = llm_client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
         )
         return response.choices[0].message.content.strip() if response.choices else "异常处理查询成功，但生成回复失败。"
     except Exception as e:
@@ -819,7 +706,7 @@ def _build_product_info_prompt(retrieved_context, target_module, purchase_stage,
 def _parse_operation_reason(sub_intent, text):
     """
     解析用户输入的售后原因。
-    支持数字 "1"/"2"/"3"/"4"、原因文本模糊匹配、"其他"或任意文本归类为"其他"。
+    支持数字 "1"/"2"/"3"/"4"、带标号的选项文本 "1. xxx"、原因文本模糊匹配、"其他"或任意文本归类为"其他"。
     返回 (reason_text, reason_code) 或 (None, None) 表示解析失败。
     """
     if not text:
@@ -831,7 +718,14 @@ def _parse_operation_reason(sub_intent, text):
         "refund_only": _REFUND_REASONS,
     }.get(sub_intent, {})
 
-    # 直接匹配数字
+    # 先尝试提取开头的数字标号，如 "1. 不想要了" → "1"
+    num_match = re.match(r"^(\d+)\.", t)
+    if num_match:
+        num = num_match.group(1)
+        if num in reason_map:
+            return reason_map[num], num
+
+    # 直接匹配纯数字
     if t in reason_map:
         return reason_map[t], t
 
@@ -872,13 +766,13 @@ def _prompt_for_reason(sub_intent):
 
 
 def _parse_return_method(text):
-    """解析 '1'/'上门取件'/'自行寄回' → method_text 或 None"""
+    """解析 '1'/'1. 上门取件'/'上门取件' → method_text 或 None"""
     if not text:
         return None
     t = text.strip()
-    if t in ("1", "上门取件"):
+    if t in ("1", "上门取件", "1. 上门取件"):
         return "上门取件"
-    if t in ("2", "自行寄回"):
+    if t in ("2", "自行寄回", "2. 自行寄回"):
         return "自行寄回"
     return None
 
@@ -922,12 +816,20 @@ def _prompt_for_exchange_spec(order):
 def _parse_exchange_spec(text, available_specs):
     """
     解析用户输入为目标规格 dict {'color': ..., 'size': ...} 或 None。
+    支持 "1"、"1. 藏青色 M"、"藏青色 M" 等格式。
     available_specs: [(num, color, size, stock), ...]
     """
     if not text:
         return None
     t = text.strip()
-    # 尝试匹配数字
+    # 先尝试提取开头的数字标号，如 "1. 藏青色 M" → "1"
+    num_match = re.match(r"^(\d+)\.", t)
+    if num_match:
+        num = num_match.group(1)
+        for n, color, size, stock in available_specs:
+            if num == n:
+                return {"color": color, "size": size}
+    # 尝试匹配纯数字
     for num, color, size, stock in available_specs:
         if t == num:
             return {"color": color, "size": size}
@@ -957,7 +859,7 @@ def _prompt_for_refund_amount(order):
 def _parse_refund_amount(text, total_amount):
     """
     解析用户输入。
-    '1'/'全额' → total_amount
+    '1'/'1. 全额退款'/'全额' → total_amount
     数字 '200' → min(200, total_amount)
     超过 total_amount → 失败
     返回: (amount, label) 或 (None, error_msg)
@@ -965,6 +867,10 @@ def _parse_refund_amount(text, total_amount):
     if not text:
         return None, "请输入退款金额"
     t = text.strip()
+    # 先尝试提取开头的数字标号，如 "1. 全额退款 ¥199" → "1"
+    num_match = re.match(r"^(\d+)\.", t)
+    if num_match and num_match.group(1) == "1":
+        return total_amount, f"全额退款 ¥{total_amount}"
     if t in ("1", "全额", "全额退款"):
         return total_amount, f"全额退款 ¥{total_amount}"
     try:
@@ -1181,7 +1087,13 @@ def _retrieve_for_recommendation(query, top_k=5):
     """检索商品知识库，返回结果列表。"""
     db_path = getattr(config, "PRODUCT_INDEX_PATH", config.VECTOR_DB_PATH)
     try:
-        results = retrieve_with_context(query, db_path, context_drug=None, top_k=top_k)
+        # 推荐场景不严格过滤，允许相关商品出现，但当前商品置顶
+        results = retrieve_with_context(
+            query, db_path,
+            context_product=get_session_product(),
+            top_k=top_k,
+            strict_filter=False,
+        )
         print(f"[recommend-retrieve] query={query} | results={len(results)}")
         return results
     except Exception as e:
@@ -1261,7 +1173,7 @@ def _yield_llm_stream(messages, enable_thinking):
         print(f"[llm-stream] LLM 调用异常: {e}")
         import traceback
         traceback.print_exc()
-        yield f"Error calling LLM: {e}"
+        yield "抱歉，智能助手服务暂时不可用，请稍后重试。如果问题持续，请联系人工客服。"
 
 
 def slow_echo(message, history, enable_thinking=True):
@@ -1318,7 +1230,9 @@ def slow_echo(message, history, enable_thinking=True):
     if enable_thinking is None:
         enable_thinking = getattr(config, 'ENABLE_THINKING', True)
     # Phase 1：优先使用商品向量库，同时兼容旧版药典向量库路径
-    current_db_path = getattr(config, 'PRODUCT_INDEX_PATH', config.VECTOR_DB_PATH)
+    current_db_path = config.PRODUCT_INDEX_PATH
+    if not os.path.exists(current_db_path):
+        current_db_path = config.VECTOR_DB_PATH
     has_kb = os.path.exists(current_db_path)
     print(f"[slow_echo] 向量库路径: {current_db_path}")
     print(f"[slow_echo] 向量库存在: {has_kb}")
@@ -1376,9 +1290,26 @@ def slow_echo(message, history, enable_thinking=True):
     elif intent != "unknown":
         _session_facts["question_repeat_count"] = 0
 
+    # ============ 1.5a) 取消关键词检测 ============
+    _CANCEL_KEYWORDS = {"取消", "算了", "不查了", "退出", "返回", "back", "cancel", "不要了"}
+    if any(kw in message for kw in _CANCEL_KEYWORDS):
+        if _session_facts.get("dialogue_state") not in {"init", "completed", "rejected"}:
+            _session_facts["dialogue_state"] = "init"
+            _session_facts["modify_type"] = None
+            _session_facts["operation_reason"] = None
+            _session_facts["operation_detail"] = None
+            _session_facts["price_range"] = None
+            _session_facts["recommend_sub_intent"] = None
+            print(f"[state-reset] 用户取消，状态机重置为 init")
+            yield "已取消当前操作，请问还有什么可以帮您的？"
+            return
+
     # ============ 1.6) 状态机延续检查 ============
     current_state = _session_facts.get("dialogue_state", "init")
     last_intent = _session_facts.get("last_intent")
+
+    # 先执行状态机延续：如果用户在某个业务的状态机中，强制延续该业务意图
+    # 这样后续的跨意图重置逻辑看到 intent == last_intent，就不会误清空状态机
     if current_state in _LOGISTICS_STATES and current_state not in {"init", "completed", "rejected"}:
         if last_intent in (None, "logistics"):
             intent = "logistics"
@@ -1394,6 +1325,19 @@ def slow_echo(message, history, enable_thinking=True):
             intent = "goods_operation"
             sub_intent = sub_intent or _session_facts.get("last_sub_intent")
             print(f"[state-machine] 状态机延续: state={current_state}, intent强制设为goods_operation, sub={sub_intent}")
+
+    # 跨意图状态污染防护：切换业务意图时重置状态机
+    if last_intent and intent != last_intent:
+        if last_intent in {"logistics", "product_recommend", "goods_operation"}:
+            if intent in {"logistics", "product_recommend", "goods_operation"}:
+                print(f"[state-reset] 业务意图切换 {last_intent} -> {intent}，重置状态机")
+                _session_facts["dialogue_state"] = "init"
+                _session_facts["modify_type"] = None
+                _session_facts["operation_reason"] = None
+                _session_facts["operation_detail"] = None
+                _session_facts["price_range"] = None
+                _session_facts["recommend_sub_intent"] = None
+                current_state = "init"
 
     # ============ 2) 会话缓存更新 ============
     _update_session_facts(intent_hint=intent, sub_intent=sub_intent, keywords=keywords, purchase_stage=purchase_stage)
@@ -1511,6 +1455,11 @@ def slow_echo(message, history, enable_thinking=True):
                 else:
                     yield "❌ 订单号或手机号有误，请重新输入。\n格式：订单号 手机号"
                     return
+
+        # 若已验证身份但状态为 init（如跨会话或清空后），直接推进到原因收集
+        if _session_facts.get("verified_identity") and _session_facts.get("dialogue_state") == "init":
+            _session_facts["dialogue_state"] = "identity_verified"
+            print(f"[goods-op-state] init → identity_verified (已验证身份，直接收集原因)")
 
         # 原因收集阶段
         if _session_facts["dialogue_state"] == "identity_verified":
@@ -1741,7 +1690,19 @@ def slow_echo(message, history, enable_thinking=True):
     if intent == "product_info":
         print(f"[branch] 商品信息查询，模块={keywords}, stage={purchase_stage}")
         try:
-            results = retrieve_product_info(message, current_db_path, target_module=keywords, top_k=5)
+            current_product = get_session_product()
+            results = retrieve_product_info(
+                message, current_db_path,
+                target_module=keywords, top_k=5,
+                context_product=current_product,
+                strict_filter=bool(current_product),
+            )
+            # 若会话尚无主要商品，尝试从检索结果推断并缓存
+            if results and not current_product:
+                inferred = _infer_primary_product(results, user_message=message)
+                if inferred:
+                    _update_session_facts(target_product=inferred)
+                    print(f"[session-facts] 推断并设置 primary_product={inferred}")
             context = "\n\n".join([f"【{r[1]}】\n{r[2][:400]}" for r in results]) if results else "（未检索到相关商品信息）"
             prompt = _build_product_info_prompt(context, keywords, purchase_stage, message)
             messages = [
@@ -1769,7 +1730,14 @@ def slow_echo(message, history, enable_thinking=True):
 
         if intent != "chitchat":
             try:
-                results = retrieve_with_context(message, current_db_path, context_drug=None, top_k=3)
+                # 如果已绑定上下文商品，始终严格过滤，确保不混入其他商品信息
+                strict_filter = bool(get_session_product()) or intent in {"product_info", "logistics", "goods_operation"}
+                results = retrieve_with_context(
+                    message, current_db_path,
+                    context_product=get_session_product(),
+                    top_k=3,
+                    strict_filter=strict_filter,
+                )
                 print(f"[slow_echo] → FAISS 返回 {len(results)} 条结果")
                 for rank, r in enumerate(results):
                     print(f"[slow_echo]   raw[{rank}] id='{r[0]}' title='{r[1]}'")
@@ -1780,6 +1748,13 @@ def slow_echo(message, history, enable_thinking=True):
                 results = []
         else:
             results = []  # 闲聊不走 RAG
+
+        # 若会话尚无主要商品，尝试从检索结果推断并缓存
+        if results and not get_session_product():
+            inferred = _infer_primary_product(results, user_message=message)
+            if inferred:
+                _update_session_facts(target_product=inferred)
+                print(f"[session-facts] 推断并设置 primary_product={inferred}")
 
     if results:
         context = "\n".join([f"【{r[1]}】\n{r[2]}" for r in results])
@@ -1848,6 +1823,7 @@ def slow_echo(message, history, enable_thinking=True):
 def get_session_status():
     """提取可展示的会话状态，供状态面板使用。"""
     return {
+        "当前商品": _session_facts.get("primary_product", "-"),
         "当前意图": _session_facts.get("last_intent", "-"),
         "子意图": _session_facts.get("last_sub_intent", "-"),
         "对话状态": _session_facts.get("dialogue_state", "-"),
@@ -1885,67 +1861,86 @@ def _get_visible_components(dialogue_state, last_intent):
     return vis
 
 
-def _respond(message, history, enable_thinking):
+def _respond(message, history, enable_thinking, primary_product=None):
     """
     包装 slow_echo，增加状态面板更新与条件渲染控制。
-    返回 generator，yield (chatbot, status, identity_vis, reason_vis, return_method_vis, price_range_vis, normal_vis)
+    返回 generator，yield (chatbot, status, identity_vis, reason_vis, return_method_vis, price_range_vis, normal_vis, primary_product)
     """
+    global _session_facts
+    if primary_product is not None:
+        _session_facts["primary_product"] = primary_product
+
     history = list(history) if history else []
-    history.append([message, ""])
+    history = history + [{"role": "user", "content": message}, {"role": "assistant", "content": ""}]
 
     # 初始 yield（使用当前状态）
     status = get_session_status()
     vis = _get_visible_components(_session_facts.get("dialogue_state", "init"), _session_facts.get("last_intent"))
-    yield history, status, gr.update(visible=vis["identity"]), gr.update(visible=vis["reason"]), gr.update(visible=vis["return_method"]), gr.update(visible=vis["price_range"]), gr.update(visible=vis["normal"])
+    yield history, status, gr.update(visible=vis["identity"]), gr.update(visible=vis["reason"]), gr.update(visible=vis["return_method"]), gr.update(visible=vis["price_range"]), gr.update(visible=vis["normal"]), _session_facts.get("primary_product")
 
     # 流式输出
     for chunk in slow_echo(message, history, enable_thinking):
-        history[-1][1] = chunk
-        yield history, status, gr.update(visible=vis["identity"]), gr.update(visible=vis["reason"]), gr.update(visible=vis["return_method"]), gr.update(visible=vis["price_range"]), gr.update(visible=vis["normal"])
+        # Gradio 6.x 要求 yield 新对象才能触发前端更新
+        history = history[:-1] + [{"role": "assistant", "content": chunk}]
+        yield history, status, gr.update(visible=vis["identity"]), gr.update(visible=vis["reason"]), gr.update(visible=vis["return_method"]), gr.update(visible=vis["price_range"]), gr.update(visible=vis["normal"]), _session_facts.get("primary_product")
 
     # 最终 yield（根据 slow_echo 结束后的新状态更新可见性）
     status = get_session_status()
     vis = _get_visible_components(_session_facts.get("dialogue_state", "init"), _session_facts.get("last_intent"))
-    yield history, status, gr.update(visible=vis["identity"]), gr.update(visible=vis["reason"]), gr.update(visible=vis["return_method"]), gr.update(visible=vis["price_range"]), gr.update(visible=vis["normal"])
+    yield history, status, gr.update(visible=vis["identity"]), gr.update(visible=vis["reason"]), gr.update(visible=vis["return_method"]), gr.update(visible=vis["price_range"]), gr.update(visible=vis["normal"]), _session_facts.get("primary_product")
 
 
-def on_send(message, history, enable_thinking):
+def on_send(message, history, enable_thinking, primary_product=None):
     """普通发送按钮事件。"""
     if not message or not message.strip():
         return
-    yield from _respond(message.strip(), history, enable_thinking)
+    yield from _respond(message.strip(), history, enable_thinking, primary_product)
 
 
-def on_identity_confirm(order_id, phone, history, enable_thinking):
+def on_identity_confirm(order_id, phone, history, enable_thinking, primary_product=None):
     """身份验证弹窗确认。"""
-    message = f"{order_id.strip()} {phone.strip()}"
-    yield from _respond(message, history, enable_thinking)
+    message = f"{(order_id or '').strip()} {(phone or '').strip()}"
+    yield from _respond(message, history, enable_thinking, primary_product)
 
 
-def on_reason_confirm(reason_value, history, enable_thinking):
+def on_reason_confirm(reason_value, history, enable_thinking, primary_product=None):
     """原因选择弹窗确认。"""
     if reason_value and "." in reason_value:
         message = reason_value.split(".")[0].strip()
     else:
         message = reason_value or ""
-    yield from _respond(message, history, enable_thinking)
+    yield from _respond(message, history, enable_thinking, primary_product)
 
 
-def on_return_method_confirm(method_value, history, enable_thinking):
+def on_return_method_confirm(method_value, history, enable_thinking, primary_product=None):
     """退货方式弹窗确认。"""
     message = method_value or ""
-    yield from _respond(message, history, enable_thinking)
+    yield from _respond(message, history, enable_thinking, primary_product)
 
 
-def on_price_confirm(min_val, max_val, history, enable_thinking):
+def on_price_confirm(min_val, max_val, history, enable_thinking, primary_product=None):
     """价格区间弹窗确认。"""
-    message = f"{int(min_val)}-{int(max_val)}"
-    yield from _respond(message, history, enable_thinking)
+    try:
+        message = f"{int(min_val or 0)}-{int(max_val or 0)}"
+    except (TypeError, ValueError):
+        message = "0-0"
+    yield from _respond(message, history, enable_thinking, primary_product)
+
+
+def _on_clear(primary_product=None):
+    """清空对话时同时重置会话状态。"""
+    clear_session_facts()
+    return None, get_session_status(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True), None
 
 
 def rebuild_product_index(input_dir):
     """调用 build_product_index 重建商品向量索引。"""
     try:
+        import sys
+        # 确保项目根目录在 sys.path 中，以便从 pkg/ 内也能找到根目录的 build_product_index.py
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
         import build_product_index
         output_path = getattr(config, "PRODUCT_INDEX_PATH", "./products.npz")
         build_product_index.build_product_vector_index(input_dir, output_path)
@@ -1955,21 +1950,27 @@ def rebuild_product_index(input_dir):
 
 
 def preview_orders(orders_path=None):
-    """加载订单 JSON 并返回前 10 条预览。"""
+    """加载订单 JSON 并返回前 10 条预览（list[list] 格式，兼容 Gradio DataFrame）。"""
     path = orders_path or getattr(config, "ORDERS_JSON_PATH", "./orders/orders.json")
     try:
         orders = load_orders(path)
         preview = []
         for o in orders[:10]:
-            preview.append({
-                "订单号": o.get("order_id", ""),
-                "手机号": o.get("user_phone", ""),
-                "状态": o.get("status", ""),
-                "金额": o.get("total_amount", ""),
-            })
+            # 金额从 items 列表中累加计算
+            items = o.get("items", [])
+            total = 0.0
+            for item in items:
+                if isinstance(item, dict):
+                    total += item.get("price", 0) * item.get("quantity", 0)
+            preview.append([
+                o.get("order_id", ""),
+                o.get("user_phone", ""),
+                o.get("logistics", {}).get("status", ""),
+                round(total, 2) if total else "",
+            ])
         return preview
     except Exception as e:
-        return [{"订单号": f"加载失败: {e}"}]
+        return [[f"加载失败: {e}", "", "", ""]]
 
 
 def update_ecommerce_config(es_host, es_port, es_user, es_pass, es_index, vector_db, es_scheme,
@@ -1977,8 +1978,12 @@ def update_ecommerce_config(es_host, es_port, es_user, es_pass, es_index, vector
     """
     更新配置信息（Phase 7 扩展版，包含电商配置）。
     """
+    from embed import clear_faiss_cache
     config.ES_HOST = es_host
-    config.ES_PORT = int(es_port)
+    try:
+        config.ES_PORT = int(es_port)
+    except (ValueError, TypeError):
+        config.ES_PORT = 9200
     config.ES_USER = es_user
     config.ES_PASSWORD = es_pass
     config.ES_INDEX = es_index
@@ -1987,10 +1992,41 @@ def update_ecommerce_config(es_host, es_port, es_user, es_pass, es_index, vector
     config.PRODUCT_KB_PATH = product_kb_path
     config.PRODUCT_INDEX_PATH = product_index_path
     config.ORDERS_JSON_PATH = orders_json_path
-    config.RETURN_WINDOW_DAYS = int(return_window_days) if return_window_days else 7
+    try:
+        config.RETURN_WINDOW_DAYS = int(return_window_days) if return_window_days is not None else 7
+    except (ValueError, TypeError):
+        config.RETURN_WINDOW_DAYS = 7
     clear_es_cache()
     clear_openai_client_cache()
+    clear_faiss_cache()
     return "配置已更新! (注意: 重启后将重置为配置文件默认值)"
+
+
+def _check_data_readiness():
+    """启动前检查必要数据文件是否存在"""
+    checks = []
+
+    # 检查商品索引
+    if not os.path.exists(config.PRODUCT_INDEX_PATH):
+        checks.append(f"[WARN] 商品索引未生成: {config.PRODUCT_INDEX_PATH}\n   请运行: python build_product_index.py")
+    else:
+        checks.append(f"[OK] 商品索引: {config.PRODUCT_INDEX_PATH}")
+
+    # 检查订单文件
+    if not os.path.exists(config.ORDERS_JSON_PATH):
+        checks.append(f"[WARN] 订单文件未找到: {config.ORDERS_JSON_PATH}")
+    else:
+        checks.append(f"[OK] 订单文件: {config.ORDERS_JSON_PATH}")
+
+    # 检查商品知识库目录
+    if not os.path.exists(config.PRODUCT_KB_PATH):
+        checks.append(f"[WARN] 商品知识库目录未找到: {config.PRODUCT_KB_PATH}")
+    else:
+        md_files = [f for f in os.listdir(config.PRODUCT_KB_PATH) if f.endswith('.md')]
+        checks.append(f"[OK] 商品知识库: {config.PRODUCT_KB_PATH} ({len(md_files)} 个 .md 文件)")
+
+    print("\n".join(["[data-check] " + c for c in checks]))
+    return all("[OK]" in c for c in checks)
 
 
 # ---------------------------------------------------------------------------
@@ -2028,10 +2064,10 @@ with gr.Blocks(title="智能电商客服系统") as demo:
 
                 # 动态输入区：原因选择弹窗
                 with gr.Column(visible=False) as reason_col:
-                    gr.Markdown("**📝 请选择原因**")
-                    reason_radio = gr.Radio(
-                        choices=["1. 不想要了", "2. 质量问题", "3. 描述不符", "4. 其他"],
-                        label="售后原因"
+                    gr.Markdown("**📝 请输入原因**")
+                    reason_text = gr.Textbox(
+                        label="售后原因",
+                        placeholder="回复数字（1/2/3/4）或原因描述"
                     )
                     reason_btn = gr.Button("确认原因", variant="primary")
 
@@ -2059,41 +2095,45 @@ with gr.Blocks(title="智能电商客服系统") as demo:
                         send_btn = gr.Button("发送", variant="primary")
                         clear_btn = gr.Button("清空对话")
 
+        # 会话级商品状态（Gradio State 保证跨请求保持）
+        primary_product_state = gr.State(value=None)
+
         # 事件绑定
-        send_outputs = [chatbot, status_json, identity_col, reason_col, return_method_col, price_range_col, normal_input_col]
+        send_outputs = [chatbot, status_json, identity_col, reason_col, return_method_col, price_range_col, normal_input_col, primary_product_state]
 
         send_btn.click(
             fn=on_send,
-            inputs=[msg_input, chatbot, enable_thinking_checkbox],
+            inputs=[msg_input, chatbot, enable_thinking_checkbox, primary_product_state],
             outputs=send_outputs,
         )
 
         identity_btn.click(
             fn=on_identity_confirm,
-            inputs=[order_id_input, phone_input, chatbot, enable_thinking_checkbox],
+            inputs=[order_id_input, phone_input, chatbot, enable_thinking_checkbox, primary_product_state],
             outputs=send_outputs,
         )
 
         reason_btn.click(
             fn=on_reason_confirm,
-            inputs=[reason_radio, chatbot, enable_thinking_checkbox],
+            inputs=[reason_text, chatbot, enable_thinking_checkbox, primary_product_state],
             outputs=send_outputs,
         )
 
         return_method_btn.click(
             fn=on_return_method_confirm,
-            inputs=[return_method_radio, chatbot, enable_thinking_checkbox],
+            inputs=[return_method_radio, chatbot, enable_thinking_checkbox, primary_product_state],
             outputs=send_outputs,
         )
 
         price_btn.click(
             fn=on_price_confirm,
-            inputs=[price_min, price_max, chatbot, enable_thinking_checkbox],
+            inputs=[price_min, price_max, chatbot, enable_thinking_checkbox, primary_product_state],
             outputs=send_outputs,
         )
 
         clear_btn.click(
-            fn=lambda: (None, get_session_status(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=True)),
+            fn=_on_clear,
+            inputs=[primary_product_state],
             outputs=send_outputs,
         )
 
@@ -2160,5 +2200,8 @@ with gr.Blocks(title="智能电商客服系统") as demo:
 
 # 启动应用
 if __name__ == "__main__":
+    _data_ready = _check_data_readiness()
+    if not _data_ready:
+        print("[warning] 部分数据未就绪，系统将以降级模式运行")
     demo.launch(server_name="0.0.0.0", share=False)
 

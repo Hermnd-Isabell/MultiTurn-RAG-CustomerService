@@ -24,10 +24,15 @@ class Config:
     LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 
     # E-commerce paths
-    PRODUCT_KB_PATH = os.getenv("PRODUCT_KB_PATH", os.path.join(BASE_DIR, "products"))
-    PRODUCT_INDEX_PATH = os.getenv("PRODUCT_INDEX_PATH", os.path.join(BASE_DIR, "products.npz"))
-    PRODUCT_META_PATH = os.getenv("PRODUCT_META_PATH", os.path.join(BASE_DIR, "product_meta.json"))
-    ORDERS_JSON_PATH = os.getenv("ORDERS_JSON_PATH", os.path.join(BASE_DIR, "orders", "orders.json"))
+    # 商品知识库：优先 data/products/，若不存在则回退到 data/
+    _product_kb_default = os.path.join(BASE_DIR, "data", "products")
+    PRODUCT_KB_PATH = os.getenv("PRODUCT_KB_PATH", _product_kb_default)
+    if not os.path.exists(PRODUCT_KB_PATH) and PRODUCT_KB_PATH == _product_kb_default:
+        PRODUCT_KB_PATH = os.path.join(BASE_DIR, "data")
+
+    PRODUCT_INDEX_PATH = os.getenv("PRODUCT_INDEX_PATH", os.path.join(BASE_DIR, "data", "products.npz"))
+    PRODUCT_META_PATH = os.getenv("PRODUCT_META_PATH", os.path.join(BASE_DIR, "data", "product_meta.json"))
+    ORDERS_JSON_PATH = os.getenv("ORDERS_JSON_PATH", os.path.join(BASE_DIR, "data", "orders.json"))
     RETURN_WINDOW_DAYS = int(os.getenv("RETURN_WINDOW_DAYS", "7"))
 
     # Feature flags
@@ -40,3 +45,11 @@ class Config:
     ENABLE_THINKING = os.getenv("ENABLE_THINKING", "1").strip().lower() in ("1", "true", "yes", "on")
 
 config = Config()
+
+# 启动时打印实际使用的数据路径，方便调试
+print(f"[config] BASE_DIR: {config.BASE_DIR}")
+print(f"[config] PRODUCT_KB_PATH: {config.PRODUCT_KB_PATH}")
+print(f"[config] PRODUCT_INDEX_PATH: {config.PRODUCT_INDEX_PATH}")
+print(f"[config] PRODUCT_META_PATH: {config.PRODUCT_META_PATH}")
+print(f"[config] ORDERS_JSON_PATH: {config.ORDERS_JSON_PATH}")
+print(f"[config] VECTOR_DB_PATH: {config.VECTOR_DB_PATH}")

@@ -1,10 +1,11 @@
 """
 pkg/webrun.py 测试覆盖：
-- slow_echo 的 6 个关键分支：缺 .npz 报错、ENABLE_INTENT_ROUTING 关闭、obvious_chitchat、
-  obvious_pharmacy、ambiguous→good、ambiguous→bad、意图路由层异常自降级；
+- slow_echo 的各关键分支：缺 .npz 报错、ENABLE_INTENT_ROUTING 关闭、chitchat、
+  product_info、ambiguous→classify、意图路由层异常自降级；
 - _score_result_by_fields 的精确 / 包含 / 空 title / 空 fields 四种打分；
 - update_config：把入参写回 config，且会触发 ES + OpenAI 客户端缓存失效；
-- UploadDoc.store_in_elasticsearch：ES 未就绪时优雅降级，不抛异常。
+- get_es_client / clear_es_cache 的懒加载生命周期；
+- session facts 的更新与清空。
 
 webrun.slow_echo 是流式生成器（yield 字符串片段），测试中通过 list(...) 消费。
 所有 LLM / ES / FAISS 调用均被替换为 MagicMock，保证测试无副作用。
@@ -93,14 +94,12 @@ class TestSlowEchoBranches:
         fake_client = _patch_streaming_llm(webrun)
         with patch.object(webrun, "quick_ecommerce_intent_hint") as mock_hint, \
              patch.object(webrun, "classify_ecommerce_intent") as mock_classify, \
-             patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             self._run_slow_echo(webrun)
 
         mock_hint.assert_not_called()
         mock_classify.assert_not_called()
-        mock_std_cls.assert_not_called()
         # 主路径仍应调用 LLM
         fake_client.chat.completions.create.assert_called_once()
 
@@ -114,14 +113,12 @@ class TestSlowEchoBranches:
         fake_client = _patch_streaming_llm(webrun)
         with patch.object(webrun, "quick_ecommerce_intent_hint", return_value={"intent": "chitchat", "sub_intent": None, "keywords": None, "confidence": 1.0}) as mock_hint, \
              patch.object(webrun, "classify_ecommerce_intent") as mock_classify, \
-             patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             self._run_slow_echo(webrun, message="你好")
 
         mock_hint.assert_called_once()
         mock_classify.assert_not_called()
-        mock_std_cls.assert_not_called()
 
     def test_product_info_skips_classify(self, sample_faiss_data, restore_config):
         """命中 product_info 时跳过 classify_ecommerce_intent，直接走商品 RAG。"""
@@ -133,13 +130,11 @@ class TestSlowEchoBranches:
         fake_client = _patch_streaming_llm(webrun)
         with patch.object(webrun, "quick_ecommerce_intent_hint", return_value={"intent": "product_info", "sub_intent": None, "keywords": "material", "confidence": 1.0}), \
              patch.object(webrun, "classify_ecommerce_intent") as mock_classify, \
-             patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[("d1", "材质", "100%棉")]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             self._run_slow_echo(webrun, message="什么材质")
 
         mock_classify.assert_not_called(), "product_info 必须跳过 classify"
-        mock_std_cls.assert_not_called()
 
     def test_ambiguous_calls_classify(self, sample_faiss_data, restore_config):
         """ambiguous + classify=product_info：应当调用 classify_ecommerce_intent。"""
@@ -151,16 +146,14 @@ class TestSlowEchoBranches:
         fake_client = _patch_streaming_llm(webrun)
         with patch.object(webrun, "quick_ecommerce_intent_hint", return_value="ambiguous"), \
              patch.object(webrun, "classify_ecommerce_intent", return_value={"intent": "product_info", "sub_intent": None, "keywords": "basic_info", "confidence": 0.9}) as mock_classify, \
-             patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[("d1", "基础信息", "价格299")]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             self._run_slow_echo(webrun, message="这个多少钱")
 
         mock_classify.assert_called_once()
-        mock_std_cls.assert_not_called()
 
     def test_ambiguous_unknown_skips_rerank(self, sample_faiss_data, restore_config):
-        """ambiguous + classify=unknown：不应触发 MedicineInfoStandardizer，走通用兜底。"""
+        """ambiguous + classify=unknown：走通用兜底。"""
         import webrun
 
         webrun.config.PRODUCT_INDEX_PATH = sample_faiss_data
@@ -169,13 +162,11 @@ class TestSlowEchoBranches:
         fake_client = _patch_streaming_llm(webrun)
         with patch.object(webrun, "quick_ecommerce_intent_hint", return_value="ambiguous"), \
              patch.object(webrun, "classify_ecommerce_intent", return_value={"intent": "unknown", "sub_intent": None, "keywords": None, "confidence": 0.0}) as mock_classify, \
-             patch.object(webrun, "MedicineInfoStandardizer") as mock_std_cls, \
              patch.object(webrun, "retrieve_vector_and_text", return_value=[]), \
              patch.object(webrun, "get_openai_client", return_value=fake_client):
             self._run_slow_echo(webrun)
 
         mock_classify.assert_called_once()
-        mock_std_cls.assert_not_called(), "unknown 时必须跳过 MedicineInfoStandardizer"
 
     def test_intent_layer_exception_falls_back_gracefully(self, sample_faiss_data, restore_config):
         """quick_ecommerce_intent_hint 抛异常时主流程不应中断，最终仍能拿到 LLM 流式返回。"""
@@ -301,37 +292,37 @@ class TestScoreResultByFields:
     def test_exact_match_returns_one(self):
         from webrun import _score_result_by_fields
 
-        assert _score_result_by_fields("性状", ["性状"]) == 1
+        assert _score_result_by_fields("规格材质", ["规格材质"]) == 1
 
     def test_partial_contains_returns_one(self):
         """title 包含 field 或被 field 包含都算命中。"""
         from webrun import _score_result_by_fields
 
-        assert _score_result_by_fields("性状描述", ["性状"]) == 1
-        assert _score_result_by_fields("味", ["性味与归经"]) == 1
+        assert _score_result_by_fields("规格材质详情", ["规格材质"]) == 1
+        assert _score_result_by_fields("材质", ["规格材质"]) == 1
 
     def test_no_match_returns_zero(self):
         from webrun import _score_result_by_fields
 
-        assert _score_result_by_fields("功能主治", ["性状"]) == 0
+        assert _score_result_by_fields("售后政策", ["规格材质"]) == 0
 
     def test_empty_target_fields_returns_zero(self):
         from webrun import _score_result_by_fields
 
-        assert _score_result_by_fields("功能主治", []) == 0
+        assert _score_result_by_fields("售后政策", []) == 0
 
     @pytest.mark.parametrize("title", [None, "", "   "])
     def test_empty_or_whitespace_title_returns_zero(self, title):
         """空 / None / 全空白的 title 不应被任何 field 误判命中（避免空串包含假阳性）。"""
         from webrun import _score_result_by_fields
 
-        assert _score_result_by_fields(title, ["性状", "功能主治"]) == 0
+        assert _score_result_by_fields(title, ["规格材质", "基础信息"]) == 0
 
     def test_skips_empty_fields_in_list(self):
         """target_fields 中的空字符串应被跳过，不影响其它合法字段的命中。"""
         from webrun import _score_result_by_fields
 
-        assert _score_result_by_fields("性状", ["", "性状", None]) == 1
+        assert _score_result_by_fields("规格材质", ["", "规格材质", None]) == 1
 
 
 # -----------------------------------------------------------------------------
@@ -393,61 +384,6 @@ class TestUpdateConfig:
 
 
 # -----------------------------------------------------------------------------
-# UploadDoc.store_in_elasticsearch
-# -----------------------------------------------------------------------------
-class TestUploadDocStoreInElasticsearch:
-    """ES 客户端不可用时 store_in_elasticsearch 必须优雅降级，不抛异常。"""
-
-    def test_graceful_when_es_not_ready(self, tmp_path):
-        """get_es_client 返回 None 时，方法应直接 return，不调用 .index。"""
-        import webrun
-
-        uploader = webrun.UploadDoc(file_input=str(tmp_path / "fake.docx"))
-        with patch.object(webrun, "get_es_client", return_value=None):
-            # 不应抛异常
-            uploader.store_in_elasticsearch({"当归": ["【性状】白色"]})
-
-    def test_indexes_each_chapter_when_es_ready(self, tmp_path):
-        """ES 就绪时应对每个 (title, content) 调一次 .index()。"""
-        import webrun
-
-        fake_es = MagicMock(name="FakeES")
-        uploader = webrun.UploadDoc(file_input=str(tmp_path / "fake.docx"))
-        uploader.es_index = "test-index"
-
-        content_dict = {
-            "当归": ["【性状】白色粉末"],
-            "黄连": ["【功能主治】清热"],
-        }
-        with patch.object(webrun, "get_es_client", return_value=fake_es):
-            uploader.store_in_elasticsearch(content_dict)
-
-        assert fake_es.index.call_count == 2
-        # 第一次调用的 id 应为字典中第一个 title
-        first_call = fake_es.index.call_args_list[0]
-        assert first_call.kwargs.get("index") == "test-index"
-        assert first_call.kwargs.get("id") in content_dict
-
-    def test_es_index_exception_does_not_propagate(self, tmp_path):
-        """单条 .index() 抛 ConnectionError / TransportError 时其它条目应继续处理。"""
-        import webrun
-        from elasticsearch import exceptions
-
-        fake_es = MagicMock(name="FakeES")
-        # 第一次抛 ConnectionError，第二次正常
-        fake_es.index.side_effect = [exceptions.ConnectionError("boom"), None]
-
-        uploader = webrun.UploadDoc(file_input=str(tmp_path / "fake.docx"))
-        uploader.es_index = "test-index"
-        content_dict = {"a": ["x"], "b": ["y"]}
-        with patch.object(webrun, "get_es_client", return_value=fake_es):
-            # 不应向上抛
-            uploader.store_in_elasticsearch(content_dict)
-
-        assert fake_es.index.call_count == 2
-
-
-# -----------------------------------------------------------------------------
 # get_es_client / clear_es_cache 的懒加载语义
 # -----------------------------------------------------------------------------
 class TestEsClientLifecycle:
@@ -500,46 +436,21 @@ class TestQueryRewrite:
         client.chat.completions.create = fake_create
         return client
 
-    def test_rewrite_with_pronoun(self, monkeypatch):
-        """指代词存在且不含药品名时，触发改写。"""
+    def test_rewrite_with_pronoun(self):
+        """指代词存在时，触发改写。"""
         from webrun import _rewrite_query_with_history
 
-        # 模拟 _extract_drug_name_from_query 返回 None（消息不含药品名）
-        monkeypatch.setattr(
-            "webrun._extract_drug_name_from_query", lambda msg, std=None: None
-        )
-
-        fake_llm = self._make_fake_llm("川射干的副作用是什么？")
+        fake_llm = self._make_fake_llm("云感T恤的规格是什么？")
         result = _rewrite_query_with_history(
-            "他的副作用是什么？",
-            [("川射干的性状是什么？", "川射干为不规则薄片...")],
+            "它的规格是什么？",
+            [("云感T恤的价格是多少？", "云感T恤售价89元。")],
             fake_llm,
         )
-        assert "川射干" in result
-        assert result == "川射干的副作用是什么？"
-
-    def test_rewrite_skip_when_drug_present(self, monkeypatch):
-        """消息已含药品名时，直接返回原消息，LLM 不被调用。"""
-        from webrun import _rewrite_query_with_history
-
-        called = [False]
-        def fake_create(*args, **kwargs):
-            called[0] = True
-            return None
-
-        fake_llm = MagicMock()
-        fake_llm.chat.completions.create = fake_create
-
-        result = _rewrite_query_with_history(
-            "川射干的副作用是什么？",
-            [("川射干的性状是什么？", "川射干为不规则薄片...")],
-            fake_llm,
-        )
-        assert result == "川射干的副作用是什么？"
-        assert not called[0]  # LLM 未被调用
+        assert "云感T恤" in result
+        assert result == "云感T恤的规格是什么？"
 
     def test_rewrite_skip_no_pronoun(self):
-        """不含指代词且不含药品名时，直接返回原消息。"""
+        """不含指代词时，直接返回原消息。"""
         from webrun import _rewrite_query_with_history
         msg = "你好"
         result = _rewrite_query_with_history(msg, [("...", "...")], None)
@@ -548,27 +459,23 @@ class TestQueryRewrite:
     def test_rewrite_empty_history(self):
         """history 为空时直接返回原消息。"""
         from webrun import _rewrite_query_with_history
-        msg = "他的副作用是什么？"
+        msg = "它的规格是什么？"
         result = _rewrite_query_with_history(msg, [], None)
         assert result == msg
 
-    def test_rewrite_llm_failure_fallback(self, monkeypatch):
+    def test_rewrite_llm_failure_fallback(self):
         """LLM 调用异常时降级为原消息，不抛异常。"""
         from webrun import _rewrite_query_with_history
-
-        monkeypatch.setattr(
-            "webrun._extract_drug_name_from_query", lambda msg, std=None: None
-        )
 
         fake_llm = MagicMock()
         fake_llm.chat.completions.create.side_effect = RuntimeError("boom")
 
         result = _rewrite_query_with_history(
-            "他的副作用是什么？",
-            [("川射干的性状是什么？", "川射干为不规则薄片...")],
+            "它的规格是什么？",
+            [("云感T恤的价格是多少？", "云感T恤售价89元。")],
             fake_llm,
         )
-        assert result == "他的副作用是什么？"
+        assert result == "它的规格是什么？"
 
 
 # -----------------------------------------------------------------------------
@@ -584,50 +491,39 @@ class TestSessionFacts:
 
     def test_update_and_get(self):
         """更新后 getter 返回正确值。"""
-        from webrun import _update_session_facts, get_session_drug, get_session_fields
+        from webrun import _update_session_facts, get_session_product, get_session_fields
 
-        _update_session_facts("川射干", ["性状"], "obvious_pharmacy")
-        assert get_session_drug() == "川射干"
-        assert get_session_fields() == {"性状"}
-
-    def test_fallback_when_extraction_fails(self, monkeypatch):
-        """_extract_drug_name_from_query 返回 None 时，get_session_drug() 提供缓存值。"""
-        import webrun
-        from webrun import _update_session_facts, get_session_drug
-
-        _update_session_facts("川射干", [], None)
-        # mock 提取失败
-        monkeypatch.setattr(webrun, "_extract_drug_name_from_query", lambda msg, std=None: None)
-        # 模拟 slow_echo 中的 fallback 逻辑
-        assert get_session_drug() == "川射干"
+        _update_session_facts("云感T恤", ["规格材质"], "product_info")
+        assert get_session_product() == "云感T恤"
+        assert get_session_fields() == {"规格材质"}
 
     def test_clear_session_facts(self):
         """clear_session_facts 后所有 getter 返回空/None。"""
         from webrun import (
-            _update_session_facts, get_session_drug, get_session_fields, clear_session_facts,
+            _update_session_facts, get_session_product, get_session_fields, clear_session_facts,
         )
 
-        _update_session_facts("川射干", ["性状"], "obvious_pharmacy")
+        _update_session_facts("云感T恤", ["规格材质"], "product_info")
         clear_session_facts()
-        assert get_session_drug() is None
+        assert get_session_product() is None
         assert get_session_fields() == set()
 
-    def test_multiple_drugs(self):
-        """连续更新多药品，验证 drug_history 顺序和去重。"""
+    def test_multiple_products(self):
+        """连续更新多商品，验证 product_history 顺序和去重。"""
         from webrun import _update_session_facts, clear_session_facts
         import webrun
 
         clear_session_facts()
-        _update_session_facts("川射干", [], None)
-        _update_session_facts("当归", [], None)
-        _update_session_facts("川射干", [], None)  # 重复
-        assert webrun._session_facts["drug_history"] == ["川射干", "当归"]
+        _update_session_facts("云感T恤", [], None)
+        _update_session_facts("法式连衣裙", [], None)
+        _update_session_facts("云感T恤", [], None)  # 重复
+        assert webrun._session_facts["product_history"] == ["云感T恤", "法式连衣裙"]
 
     def test_fields_accumulate(self):
         """连续更新字段，验证 queried_fields 累积。"""
         from webrun import _update_session_facts, get_session_fields, clear_session_facts
 
         clear_session_facts()
-        _update_session_facts(None, ["性状"], None)
-        _update_session_facts(None, ["鉴别", "性状"], None)
-        assert get_session_fields() == {"性状", "鉴别"}
+        _update_session_facts(None, ["规格材质"], None)
+        _update_session_facts(None, ["基础信息", "规格材质"], None)
+        assert get_session_fields() == {"规格材质", "基础信息"}

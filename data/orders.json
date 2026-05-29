@@ -1,0 +1,766 @@
+[
+  {
+    "order_id": "ORD20250622001",
+    "user_phone": "13800138001",
+    "create_time": "2026-05-15T10:30:00",
+    "items": [
+      {
+        "sku_id": "TX2026001",
+        "product_name": "云感·极简主义|纯棉U领基础百搭T恤",
+        "specs": {
+          "color": "白色",
+          "size": "M"
+        },
+        "price": 89.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "delivered",
+      "carrier": "顺丰速运",
+      "tracking_no": "SF20260515001",
+      "path": [
+        {
+          "node": "杭州发货仓",
+          "time": "2026-05-15T14:00:00",
+          "weather": "晴, 26°C"
+        },
+        {
+          "node": "上海转运中心",
+          "time": "2026-05-16T03:00:00",
+          "weather": "多云, 24°C"
+        },
+        {
+          "node": "目的地网点",
+          "time": "2026-05-17T08:00:00",
+          "weather": "小雨, 20°C"
+        }
+      ],
+      "estimated_arrival": "2026-05-17T18:00:00",
+      "current_location": "目的地网点",
+      "abnormal_status": null,
+      "signed_time": "2026-05-18T09:00:00",
+      "address": "上海市浦东新区张江高科技园区科苑路88号",
+      "recipient": "张女士",
+      "phone": "13800138001"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-24T23:59:59",
+      "exchange_inventory": {
+        "白色": {
+          "S": 5,
+          "M": 3,
+          "L": 0,
+          "XL": 8
+        },
+        "黑色": {
+          "S": 10,
+          "M": 10,
+          "L": 10,
+          "XL": 10
+        },
+        "浅灰": {
+          "S": 2,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        },
+        "雾霾蓝": {
+          "S": 0,
+          "M": 0,
+          "L": 3,
+          "XL": 3
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  },
+  {
+    "order_id": "ORD20250622002",
+    "user_phone": "13912345678",
+    "create_time": "2026-05-18T09:00:00",
+    "items": [
+      {
+        "sku_id": "CS2026001",
+        "product_name": "悦雅·步履生姿|雪纺垂感通勤长袖衬衫",
+        "specs": {
+          "color": "米白",
+          "size": "L"
+        },
+        "price": 359.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "shipped",
+      "carrier": "中通快递",
+      "tracking_no": "ZT20260518001",
+      "path": [
+        {
+          "node": "上海发货仓",
+          "time": "2026-05-18T16:00:00",
+          "weather": "晴, 22°C"
+        },
+        {
+          "node": "苏州转运中心",
+          "time": "2026-05-19T04:00:00",
+          "weather": "阴, 20°C"
+        }
+      ],
+      "estimated_arrival": "2026-05-20T18:00:00",
+      "current_location": "苏州转运中心",
+      "abnormal_status": null,
+      "signed_time": null,
+      "address": "上海市杨浦区四平路1294号同济大学",
+      "recipient": "李女士",
+      "phone": "13912345678"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-27T23:59:59",
+      "exchange_inventory": {
+        "米白": {
+          "S": 3,
+          "M": 5,
+          "L": 0,
+          "XL": 2
+        },
+        "浅粉": {
+          "S": 5,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  },
+  {
+    "order_id": "ORD20250622003",
+    "user_phone": "13787654321",
+    "create_time": "2026-05-20T14:00:00",
+    "items": [
+      {
+        "sku_id": "DD2026001",
+        "product_name": "柔舞·夏日序曲|冰丝修身吊带背心",
+        "specs": {
+          "color": "白色",
+          "size": "S"
+        },
+        "price": 59.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "unshipped",
+      "carrier": "待分配",
+      "tracking_no": "",
+      "path": [],
+      "estimated_arrival": "2026-05-27T18:00:00",
+      "current_location": "仓库备货中",
+      "abnormal_status": null,
+      "signed_time": null,
+      "address": "安徽省合肥市蜀山区望江西路888号",
+      "recipient": "王女士",
+      "phone": "13787654321"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-06-03T23:59:59",
+      "exchange_inventory": {
+        "白色": {
+          "S": 5,
+          "M": 3,
+          "L": 0,
+          "XL": 8
+        },
+        "肤色": {
+          "S": 10,
+          "M": 10,
+          "L": 10,
+          "XL": 10
+        },
+        "香槟色": {
+          "S": 2,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  },
+  {
+    "order_id": "ORD20250622004",
+    "user_phone": "13611112222",
+    "create_time": "2026-05-05T10:00:00",
+    "items": [
+      {
+        "sku_id": "JK2026001",
+        "product_name": "潮序·街头新生|经典拼色休闲棒球服夹克外套",
+        "specs": {
+          "color": "黑色",
+          "size": "XL"
+        },
+        "price": 539.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "delivered",
+      "carrier": "韵达快递",
+      "tracking_no": "YD20260505001",
+      "path": [
+        {
+          "node": "宁波发货仓",
+          "time": "2026-05-05T16:00:00",
+          "weather": "晴, 24°C"
+        },
+        {
+          "node": "杭州转运中心",
+          "time": "2026-05-06T04:00:00",
+          "weather": "多云, 23°C"
+        },
+        {
+          "node": "目的地网点",
+          "time": "2026-05-07T09:00:00",
+          "weather": "晴, 25°C"
+        }
+      ],
+      "estimated_arrival": "2026-05-07T18:00:00",
+      "current_location": "目的地网点",
+      "abnormal_status": null,
+      "signed_time": "2026-05-10T14:30:00",
+      "address": "湖南省长沙市岳麓区麓山南路932号",
+      "recipient": "陈女士",
+      "phone": "13611112222"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-14T23:59:59",
+      "exchange_inventory": {
+        "黑色": {
+          "S": 5,
+          "M": 3,
+          "L": 2,
+          "XL": 8
+        },
+        "藏青": {
+          "S": 10,
+          "M": 10,
+          "L": 10,
+          "XL": 10
+        },
+        "卡其": {
+          "S": 2,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  },
+  {
+    "order_id": "ORD20250622005",
+    "user_phone": "13533334444",
+    "create_time": "2026-04-15T09:30:00",
+    "items": [
+      {
+        "sku_id": "DY2026001",
+        "product_name": "慕绒·暖冬雅叙|高端羊毛双面呢中长款大衣",
+        "specs": {
+          "color": "驼色",
+          "size": "L"
+        },
+        "price": 1599.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "delivered",
+      "carrier": "顺丰速运",
+      "tracking_no": "SF20260415001",
+      "path": [
+        {
+          "node": "苏州发货仓",
+          "time": "2026-04-15T14:00:00",
+          "weather": "晴, 18°C"
+        },
+        {
+          "node": "上海转运中心",
+          "time": "2026-04-16T03:00:00",
+          "weather": "阴, 16°C"
+        },
+        {
+          "node": "目的地网点",
+          "time": "2026-04-17T08:00:00",
+          "weather": "小雨, 14°C"
+        }
+      ],
+      "estimated_arrival": "2026-04-17T18:00:00",
+      "current_location": "目的地网点",
+      "abnormal_status": null,
+      "signed_time": "2026-04-20T11:00:00",
+      "address": "广东省深圳市南山区科技园南路88号",
+      "recipient": "刘女士",
+      "phone": "13533334444"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-04-24T23:59:59",
+      "exchange_inventory": {
+        "驼色": {
+          "S": 0,
+          "M": 0,
+          "L": 2,
+          "XL": 3
+        },
+        "黑色": {
+          "S": 5,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        },
+        "奶白": {
+          "S": 2,
+          "M": 2,
+          "L": 2,
+          "XL": 2
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  },
+  {
+    "order_id": "ORD20250622006",
+    "user_phone": "15055556666",
+    "create_time": "2026-05-01T10:00:00",
+    "items": [
+      {
+        "sku_id": "YR2026001",
+        "product_name": "暖冬·轻盈序曲|白鸭绒轻薄短款羽绒服",
+        "specs": {
+          "color": "黑色",
+          "size": "M"
+        },
+        "price": 899.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "delivered",
+      "carrier": "中通快递",
+      "tracking_no": "ZT20260501001",
+      "path": [
+        {
+          "node": "杭州发货仓",
+          "time": "2026-05-01T16:00:00",
+          "weather": "晴, 20°C"
+        },
+        {
+          "node": "南京转运中心",
+          "time": "2026-05-02T04:00:00",
+          "weather": "多云, 18°C"
+        },
+        {
+          "node": "目的地网点",
+          "time": "2026-05-03T08:00:00",
+          "weather": "晴, 22°C"
+        }
+      ],
+      "estimated_arrival": "2026-05-03T18:00:00",
+      "current_location": "目的地网点",
+      "abnormal_status": null,
+      "signed_time": "2026-05-05T09:00:00",
+      "address": "四川省成都市锦江区春熙路168号",
+      "recipient": "赵女士",
+      "phone": "15055556666"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-10T23:59:59",
+      "exchange_inventory": {
+        "黑色": {
+          "S": 5,
+          "M": 3,
+          "L": 2,
+          "XL": 8
+        },
+        "白色": {
+          "S": 0,
+          "M": 0,
+          "L": 0,
+          "XL": 5
+        },
+        "雾霾蓝": {
+          "S": 2,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        },
+        "粉色": {
+          "S": 3,
+          "M": 3,
+          "L": 3,
+          "XL": 3
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": [
+      {
+        "type": "return",
+        "reason": "不想要了",
+        "detail": "上门取件",
+        "status": "申请中",
+        "apply_time": "2026-05-06T10:00:00",
+        "update_time": "2026-05-06T10:00:00"
+      }
+    ]
+  },
+  {
+    "order_id": "ORD20250622007",
+    "user_phone": "15177778888",
+    "create_time": "2026-05-08T09:00:00",
+    "items": [
+      {
+        "sku_id": "MY2026001",
+        "product_name": "柔绒·暖冬絮语|半高领软糯打底毛衣",
+        "specs": {
+          "color": "奶白",
+          "size": "S"
+        },
+        "price": 119.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "delivered",
+      "carrier": "韵达快递",
+      "tracking_no": "YD20260508001",
+      "path": [
+        {
+          "node": "东莞发货仓",
+          "time": "2026-05-08T14:00:00",
+          "weather": "晴, 28°C"
+        },
+        {
+          "node": "广州转运中心",
+          "time": "2026-05-09T03:00:00",
+          "weather": "多云, 26°C"
+        },
+        {
+          "node": "目的地网点",
+          "time": "2026-05-10T08:00:00",
+          "weather": "小雨, 24°C"
+        }
+      ],
+      "estimated_arrival": "2026-05-10T18:00:00",
+      "current_location": "目的地网点",
+      "abnormal_status": null,
+      "signed_time": "2026-05-12T16:00:00",
+      "address": "浙江省杭州市西湖区文三路199号",
+      "recipient": "孙女士",
+      "phone": "15177778888"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-17T23:59:59",
+      "exchange_inventory": {
+        "奶白": {
+          "S": 5,
+          "M": 3,
+          "L": 0,
+          "XL": 8
+        },
+        "焦糖": {
+          "S": 10,
+          "M": 10,
+          "L": 10,
+          "XL": 10
+        },
+        "深灰": {
+          "S": 2,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        },
+        "酒红": {
+          "S": 0,
+          "M": 0,
+          "L": 3,
+          "XL": 3
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  },
+  {
+    "order_id": "ORD20250622008",
+    "user_phone": "15299990000",
+    "create_time": "2026-04-28T14:00:00",
+    "items": [
+      {
+        "sku_id": "XZ2026001",
+        "product_name": "悦雅·从容步履|宽松廓形休闲西装外套",
+        "specs": {
+          "color": "黑色",
+          "size": "L"
+        },
+        "price": 1269.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "delivered",
+      "carrier": "顺丰速运",
+      "tracking_no": "SF20260428001",
+      "path": [
+        {
+          "node": "上海发货仓",
+          "time": "2026-04-28T16:00:00",
+          "weather": "晴, 22°C"
+        },
+        {
+          "node": "杭州转运中心",
+          "time": "2026-04-29T04:00:00",
+          "weather": "阴, 20°C"
+        },
+        {
+          "node": "目的地网点",
+          "time": "2026-04-30T08:00:00",
+          "weather": "晴, 23°C"
+        }
+      ],
+      "estimated_arrival": "2026-04-30T18:00:00",
+      "current_location": "目的地网点",
+      "abnormal_status": null,
+      "signed_time": "2026-05-01T10:00:00",
+      "address": "江苏省南京市鼓楼区中山路1号",
+      "recipient": "周女士",
+      "phone": "15299990000"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-07T23:59:59",
+      "exchange_inventory": {
+        "黑色": {
+          "S": 5,
+          "M": 3,
+          "L": 0,
+          "XL": 8
+        },
+        "白色": {
+          "S": 10,
+          "M": 10,
+          "L": 10,
+          "XL": 10
+        },
+        "灰色": {
+          "S": 2,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        },
+        "卡其": {
+          "S": 0,
+          "M": 0,
+          "L": 3,
+          "XL": 3
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": [
+      {
+        "type": "exchange",
+        "reason": "尺码不合适",
+        "detail": "黑色 XL",
+        "status": "申请中",
+        "apply_time": "2026-05-02T10:00:00",
+        "update_time": "2026-05-02T10:00:00"
+      }
+    ]
+  },
+  {
+    "order_id": "ORD20250622009",
+    "user_phone": "15322223333",
+    "create_time": "2026-05-15T10:00:00",
+    "items": [
+      {
+        "sku_id": "RK2026001",
+        "product_name": "尚衣·热辣夏日|高腰弹力牛仔热裤",
+        "specs": {
+          "color": "浅蓝色",
+          "size": "M"
+        },
+        "price": 89.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "in_transit",
+      "carrier": "中通快递",
+      "tracking_no": "ZT20260515001",
+      "path": [
+        {
+          "node": "杭州发货仓",
+          "time": "2026-05-15T16:00:00",
+          "weather": "晴, 30°C"
+        },
+        {
+          "node": "南京转运中心",
+          "time": "2026-05-16T04:00:00",
+          "weather": "多云, 28°C"
+        },
+        {
+          "node": "目的地网点",
+          "time": "2026-05-17T08:00:00",
+          "weather": "晴, 29°C"
+        }
+      ],
+      "estimated_arrival": "2026-05-17T18:00:00",
+      "current_location": "南京转运中心",
+      "abnormal_status": "delay",
+      "signed_time": null,
+      "address": "上海市浦东新区张江高科技园区科苑路88号",
+      "recipient": "吴女士",
+      "phone": "15322223333"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-24T23:59:59",
+      "exchange_inventory": {
+        "浅蓝色": {
+          "S": 5,
+          "M": 3,
+          "L": 0,
+          "XL": 8
+        },
+        "白色": {
+          "S": 10,
+          "M": 10,
+          "L": 10,
+          "XL": 10
+        },
+        "黑色": {
+          "S": 2,
+          "M": 5,
+          "L": 5,
+          "XL": 5
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  },
+  {
+    "order_id": "ORD20250622010",
+    "user_phone": "15444445555",
+    "create_time": "2026-05-18T09:00:00",
+    "items": [
+      {
+        "sku_id": "LYQ-2026001",
+        "product_name": "夏日·法式漫语|碎花收腰中长连衣裙",
+        "specs": {
+          "color": "杏底碎花",
+          "size": "M"
+        },
+        "price": 199.0,
+        "quantity": 1
+      }
+    ],
+    "logistics": {
+      "status": "in_transit",
+      "carrier": "韵达快递",
+      "tracking_no": "YD20260518001",
+      "path": [
+        {
+          "node": "杭州发货仓",
+          "time": "2026-05-18T16:00:00",
+          "weather": "晴, 27°C"
+        },
+        {
+          "node": "上海转运中心",
+          "time": "2026-05-19T04:00:00",
+          "weather": "多云, 25°C"
+        }
+      ],
+      "estimated_arrival": "2026-05-20T18:00:00",
+      "current_location": "上海转运中心",
+      "abnormal_status": "lost",
+      "signed_time": null,
+      "address": "北京市海淀区中关村大街1号",
+      "recipient": "郑女士",
+      "phone": "15444445555"
+    },
+    "after_sales": {
+      "return_window_days": 7,
+      "return_deadline": "2026-05-27T23:59:59",
+      "exchange_inventory": {
+        "杏底碎花": {
+          "S": 5,
+          "M": 3,
+          "L": 0,
+          "XL": 8
+        },
+        "蓝底碎花": {
+          "S": 10,
+          "M": 10,
+          "L": 10,
+          "XL": 10
+        }
+      },
+      "refund_rules": {
+        "unshipped": "full",
+        "shipped": "intercept_required",
+        "delivered": "reject"
+      }
+    },
+    "operations_history": []
+  }
+]
