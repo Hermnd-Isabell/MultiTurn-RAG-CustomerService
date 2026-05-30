@@ -1,4 +1,3 @@
-import time
 import os
 import re
 import gradio as gr
@@ -25,7 +24,6 @@ from orders import (
     update_order_field,
     load_orders,
 )
-import os
 
 from config import config
 
@@ -1236,7 +1234,6 @@ def slow_echo(message, history, enable_thinking=True):
             return
 
     # ============ 0b) 查询改写：消除指代词 ============
-    original_message = message
     if history and getattr(config, 'ENABLE_INTENT_ROUTING', False):
         rewritten = _rewrite_query_with_history(message, history, get_openai_client())
         if rewritten and rewritten != message:
@@ -1296,7 +1293,7 @@ def slow_echo(message, history, enable_thinking=True):
         return
 
     # 2. 连续追问 ≥3 次
-    is_repeat, repeat_count = _detect_repeat_question(message, intent, _session_facts)
+    _, repeat_count = _detect_repeat_question(message, intent, _session_facts)
     if repeat_count >= 3:
         yield _transfer_to_human("repeat", _session_facts)
         return
@@ -1529,7 +1526,7 @@ def slow_echo(message, history, enable_thinking=True):
             return
 
         if _session_facts["dialogue_state"] == "awaiting_reason":
-            reason, reason_code = _parse_operation_reason(sub_intent, message)
+            reason, _ = _parse_operation_reason(sub_intent, message)
             if reason:
                 _session_facts["operation_reason"] = reason
                 next_state = {

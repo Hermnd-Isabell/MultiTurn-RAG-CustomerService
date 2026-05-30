@@ -190,7 +190,7 @@ class TestValidateGoodsOperation:
 # ---------------------------------------------------------------------------
 class TestWriteBackGoodsOperation:
     def test_appends_history(self, tmp_path, monkeypatch):
-        from webrun import _write_back_goods_operation, config as webrun_config
+        from webrun import _write_back_goods_operation
         orders_path = tmp_path / "orders.json"
         orders_data = [{"order_id": "ORD001", "user_phone": "13800138000", "operations_history": [], "status": "已完成"}]
         orders_path.write_text(json.dumps(orders_data, ensure_ascii=False), encoding="utf-8")
@@ -242,7 +242,6 @@ def _make_order():
 class TestStateMachineReturnFlow:
     def test_full_return_flow(self, monkeypatch, tmp_path):
         from webrun import slow_echo, _session_facts
-        import orders as orders_mod
 
         orders_path = tmp_path / "orders.json"
         orders_path.write_text(json.dumps([_make_order()], ensure_ascii=False), encoding="utf-8")
