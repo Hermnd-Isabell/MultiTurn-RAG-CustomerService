@@ -546,6 +546,24 @@ _RETURN_METHODS = {
     "1": "上门取件", "2": "自行寄回"
 }
 
+# 状态机延续时用于校验 sub_intent 是否匹配业务意图
+_VALID_SUB_INTENTS_BY_INTENT = {
+    "logistics": {"track", "abnormal", "modify"},
+    "product_recommend": {"substitute", "similar_style", "matching"},
+    "goods_operation": {"return", "exchange", "refund_only"},
+}
+
+
+def _resolve_sub_intent_for_continuation(intent, current_sub_intent, session_facts):
+    """
+    状态机延续时解析有效的 sub_intent。
+    如果当前轮识别的 sub_intent 对延续的业务意图无效，回退到历史值。
+    """
+    valid_subs = _VALID_SUB_INTENTS_BY_INTENT.get(intent, set())
+    if current_sub_intent in valid_subs:
+        return current_sub_intent
+    return session_facts.get("last_sub_intent")
+
 
 def _parse_price_range(text):
     """纯解析函数，返回 dict {min, max, text} 或 None。"""
@@ -761,6 +779,8 @@ def _prompt_for_reason(sub_intent):
         "exchange": _EXCHANGE_REASONS,
         "refund_only": _REFUND_REASONS,
     }
+    if sub_intent not in reason_map:
+        return "请告诉我们您的售后原因（回复数字或原因）：\n1. 不想要了\n2. 质量问题\n3. 描述不符\n4. 其他"
     options = "\n".join([f"{k}. {v}" for k, v in reason_map[sub_intent].items()])
     return f"请告诉我们您的{labels[sub_intent]}原因（回复数字或原因）：\n{options}"
 
@@ -1309,22 +1329,62 @@ def slow_echo(message, history, enable_thinking=True):
     last_intent = _session_facts.get("last_intent")
 
     # 先执行状态机延续：如果用户在某个业务的状态机中，强制延续该业务意图
-    # 这样后续的跨意图重置逻辑看到 intent == last_intent，就不会误清空状态机
-    if current_state in _LOGISTICS_STATES and current_state not in {"init", "completed", "rejected"}:
-        if last_intent in (None, "logistics"):
+    # 注意：不同业务的状态名有重叠（如 awaiting_identity），必须以 last_intent 为第一优先级
+    if current_state not in {"init", "completed", "rejected"}:
+        if last_intent == "logistics" and current_state in _LOGISTICS_STATES:
             intent = "logistics"
-            sub_intent = sub_intent or _session_facts.get("last_sub_intent")
+            sub_intent = _resolve_sub_intent_for_continuation("logistics", sub_intent, _session_facts)
             print(f"[state-machine] 状态机延续: state={current_state}, intent强制设为logistics, sub={sub_intent}")
-    elif current_state in _RECOMMEND_STATES and current_state not in {"init", "completed", "rejected"}:
-        if last_intent in (None, "product_recommend"):
+        elif last_intent == "product_recommend" and current_state in _RECOMMEND_STATES:
             intent = "product_recommend"
-            sub_intent = sub_intent or _session_facts.get("last_sub_intent")
+            sub_intent = _resolve_sub_intent_for_continuation("product_recommend", sub_intent, _session_facts)
             print(f"[state-machine] 状态机延续: state={current_state}, intent强制设为product_recommend, sub={sub_intent}")
-    elif current_state in _GOODS_OP_STATES and current_state not in {"init", "completed", "rejected"}:
-        if last_intent == "goods_operation":
+        elif last_intent == "goods_operation" and current_state in _GOODS_OP_STATES:
             intent = "goods_operation"
-            sub_intent = sub_intent or _session_facts.get("last_sub_intent")
+            sub_intent = _resolve_sub_intent_for_continuation("goods_operation", sub_intent, _session_facts)
             print(f"[state-machine] 状态机延续: state={current_state}, intent强制设为goods_operation, sub={sub_intent}")
+        elif last_intent in (None, "unknown"):
+            # last_intent 丢失时按状态集合兜底（注意重叠状态按 logistics > goods_operation > recommend 优先）
+            if current_state in _LOGISTICS_STATES:
+                intent = "logistics"
+                sub_intent = _resolve_sub_intent_for_continuation("logistics", sub_intent, _session_facts)
+                print(f"[state-machine] 状态机延续(last_intent丢失): state={current_state}, intent强制设为logistics, sub={sub_intent}")
+            elif current_state in _GOODS_OP_STATES:
+                intent = "goods_operation"
+                sub_intent = _resolve_sub_intent_for_continuation("goods_operation", sub_intent, _session_facts)
+                print(f"[state-machine] 状态机延续(last_intent丢失): state={current_state}, intent强制设为goods_operation, sub={sub_intent}")
+            elif current_state in _RECOMMEND_STATES:
+                intent = "product_recommend"
+                sub_intent = _resolve_sub_intent_for_continuation("product_recommend", sub_intent, _session_facts)
+                print(f"[state-machine] 状态机延续(last_intent丢失): state={current_state}, intent强制设为product_recommend, sub={sub_intent}")
+
+    # 兜底：如果意图识别返回 unknown，但用户明显处于某个状态机流程中，根据状态推断意图
+    if intent == "unknown" and current_state not in {"init", "completed", "rejected"}:
+        if last_intent == "logistics" and current_state in _LOGISTICS_STATES:
+            intent = "logistics"
+            sub_intent = _resolve_sub_intent_for_continuation("logistics", sub_intent, _session_facts)
+            print(f"[state-machine] unknown 兜底: state={current_state}, intent强制设为logistics")
+        elif last_intent == "goods_operation" and current_state in _GOODS_OP_STATES:
+            intent = "goods_operation"
+            sub_intent = _resolve_sub_intent_for_continuation("goods_operation", sub_intent, _session_facts)
+            print(f"[state-machine] unknown 兜底: state={current_state}, intent强制设为goods_operation")
+        elif last_intent == "product_recommend" and current_state in _RECOMMEND_STATES:
+            intent = "product_recommend"
+            sub_intent = _resolve_sub_intent_for_continuation("product_recommend", sub_intent, _session_facts)
+            print(f"[state-machine] unknown 兜底: state={current_state}, intent强制设为product_recommend")
+        elif last_intent in (None, "unknown"):
+            if current_state in _LOGISTICS_STATES:
+                intent = "logistics"
+                sub_intent = _resolve_sub_intent_for_continuation("logistics", sub_intent, _session_facts)
+                print(f"[state-machine] unknown 兜底(last_intent丢失): state={current_state}, intent强制设为logistics")
+            elif current_state in _GOODS_OP_STATES:
+                intent = "goods_operation"
+                sub_intent = _resolve_sub_intent_for_continuation("goods_operation", sub_intent, _session_facts)
+                print(f"[state-machine] unknown 兜底(last_intent丢失): state={current_state}, intent强制设为goods_operation")
+            elif current_state in _RECOMMEND_STATES:
+                intent = "product_recommend"
+                sub_intent = _resolve_sub_intent_for_continuation("product_recommend", sub_intent, _session_facts)
+                print(f"[state-machine] unknown 兜底(last_intent丢失): state={current_state}, intent强制设为product_recommend")
 
     # 跨意图状态污染防护：切换业务意图时重置状态机
     if last_intent and intent != last_intent:

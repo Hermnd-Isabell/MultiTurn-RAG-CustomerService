@@ -411,3 +411,146 @@ class TestRejectThenFallback:
         assert _session_facts["dialogue_state"] == "rejected"
         # 校验失败时 prompt 应包含 fail_message
         assert "超过退货期限" in stream_captured[0][1]["content"]
+
+
+class TestStateMachineWithUnknownIntent:
+    """
+    模拟真实场景：用户进入售后状态机后，第二轮输入（如订单号）被意图识别为 unknown，
+    但系统应根据 dialogue_state 正确延续状态机，而不是走通用兜底。
+    """
+    def test_return_flow_with_unknown_second_intent(self, monkeypatch, tmp_path):
+        from webrun import slow_echo, _session_facts
+
+        orders_path = tmp_path / "orders.json"
+        orders_path.write_text(json.dumps([_make_order()], ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr("webrun.config.ORDERS_JSON_PATH", str(orders_path))
+        monkeypatch.setattr("orders.config.ORDERS_JSON_PATH", str(orders_path))
+        monkeypatch.setattr("config.config.ENABLE_INTENT_ROUTING", True)
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+
+        call_count = [0]
+        def _mock_hint(msg):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"intent": "goods_operation", "sub_intent": "return", "confidence": 0.95, "keywords": None}
+            # 第二轮输入订单号，规则预筛返回 ambiguous，LLM 返回 unknown
+            return "ambiguous"
+        monkeypatch.setattr("webrun.quick_ecommerce_intent_hint", _mock_hint)
+
+        monkeypatch.setattr(
+            "webrun.classify_ecommerce_intent",
+            lambda msg: {"intent": "unknown", "sub_intent": None, "confidence": 0.35, "keywords": None}
+        )
+
+        stream_captured = []
+        def _mock_stream(messages, enable_thinking):
+            stream_captured.append(messages)
+            yield "申请已受理"
+        monkeypatch.setattr("webrun._yield_llm_stream", _mock_stream)
+
+        _session_facts["dialogue_state"] = "init"
+        _session_facts["verified_identity"] = False
+        _session_facts["transfer_requested"] = False
+        _session_facts["last_intent"] = None
+
+        # Step 1: 用户说"我要退货" → 进入 awaiting_identity
+        result = list(slow_echo("我要退货", [], enable_thinking=False))
+        assert any("订单号和手机号" in r for r in result)
+        assert _session_facts["dialogue_state"] == "awaiting_identity"
+
+        # Step 2: 用户提供订单号，意图识别返回 unknown
+        # 但 dialogue_state=awaiting_identity 应强制延续 goods_operation 意图
+        result = list(slow_echo("ORD20250520001 13800138000", [], enable_thinking=False))
+        assert any("退货原因" in r for r in result), f"实际返回: {result}"
+        assert _session_facts["dialogue_state"] == "awaiting_reason"
+
+        # Step 3: 后续流程正常推进
+        result = list(slow_echo("1", [], enable_thinking=False))
+        assert any("退货方式" in r for r in result)
+        assert _session_facts["dialogue_state"] == "awaiting_return_method"
+
+        result = list(slow_echo("1", [], enable_thinking=False))
+        assert result[-1] == "申请已受理"
+        assert _session_facts["dialogue_state"] == "completed"
+
+    def test_return_flow_with_missing_last_intent(self, monkeypatch, tmp_path):
+        """
+        极端场景：last_intent 意外丢失（如被设为 None），但 dialogue_state 处于 goods_operation
+        独有的状态（awaiting_reason），且 last_sub_intent 仍保留。系统应根据 dialogue_state
+        兜底推断 goods_operation 意图，并恢复 sub_intent。
+        """
+        from webrun import slow_echo, _session_facts
+
+        orders_path = tmp_path / "orders.json"
+        orders_path.write_text(json.dumps([_make_order()], ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr("webrun.config.ORDERS_JSON_PATH", str(orders_path))
+        monkeypatch.setattr("orders.config.ORDERS_JSON_PATH", str(orders_path))
+        monkeypatch.setattr("config.config.ENABLE_INTENT_ROUTING", True)
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+
+        monkeypatch.setattr("webrun.quick_ecommerce_intent_hint", lambda msg: "ambiguous")
+        monkeypatch.setattr(
+            "webrun.classify_ecommerce_intent",
+            lambda msg: {"intent": "unknown", "sub_intent": None, "confidence": 0.35, "keywords": None}
+        )
+
+        _session_facts["dialogue_state"] = "awaiting_reason"
+        _session_facts["verified_identity"] = True
+        _session_facts["bound_order_id"] = "ORD20250520001"
+        _session_facts["bound_phone"] = "13800138000"
+        _session_facts["transfer_requested"] = False
+        _session_facts["last_intent"] = None  # 模拟丢失
+        _session_facts["last_sub_intent"] = "return"  # 但子意图仍保留
+
+        result = list(slow_echo("1", [], enable_thinking=False))
+        assert any("退货方式" in r for r in result), f"实际返回: {result}"
+        assert _session_facts["dialogue_state"] == "awaiting_return_method"
+
+    def test_logistics_flow_with_unknown_second_intent(self, monkeypatch, tmp_path):
+        """
+        物流场景：第二轮输入被意图识别为 unknown，应根据 dialogue_state 兜底。
+        """
+        from webrun import slow_echo, _session_facts
+        import webrun
+
+        orders_path = tmp_path / "orders.json"
+        orders_path.write_text(json.dumps([_make_order()], ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr("webrun.config.ORDERS_JSON_PATH", str(orders_path))
+        monkeypatch.setattr("orders.config.ORDERS_JSON_PATH", str(orders_path))
+        monkeypatch.setattr("config.config.ENABLE_INTENT_ROUTING", True)
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+
+        call_count = [0]
+        def _mock_hint(msg):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"intent": "logistics", "sub_intent": "track", "confidence": 0.95, "keywords": None}
+            return "ambiguous"
+        monkeypatch.setattr("webrun.quick_ecommerce_intent_hint", _mock_hint)
+
+        monkeypatch.setattr(
+            "webrun.classify_ecommerce_intent",
+            lambda msg: {"intent": "unknown", "sub_intent": None, "confidence": 0.35, "keywords": None}
+        )
+
+        llm_captured = []
+        def _mock_llm_track(order, message, history, llm_client):
+            llm_captured.append("track")
+            return "物流轨迹回复"
+        monkeypatch.setattr(webrun, "_handle_logistics_track", _mock_llm_track)
+
+        _session_facts["dialogue_state"] = "init"
+        _session_facts["verified_identity"] = False
+        _session_facts["transfer_requested"] = False
+        _session_facts["last_intent"] = None
+
+        # Step 1: 查询物流
+        result = list(slow_echo("快递到哪了", [], enable_thinking=False))
+        assert any("订单号和手机号" in r for r in result)
+        assert _session_facts["dialogue_state"] == "awaiting_identity"
+
+        # Step 2: 提供订单号，意图识别返回 unknown，但应兜底到 logistics
+        result = list(slow_echo("ORD20250520001 13800138000", [], enable_thinking=False))
+        assert result[-1] == "物流轨迹回复"
+        assert _session_facts["dialogue_state"] == "completed"
+        assert llm_captured == ["track"]
